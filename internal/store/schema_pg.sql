@@ -278,7 +278,11 @@ CREATE TABLE IF NOT EXISTS message_labels (
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     body_text TEXT,
-    body_html TEXT
+    body_html TEXT,
+    -- Externalized rendered HTML: non-NULL means the HTML lives in the
+    -- attachment CAS under this hash and body_html is NULL. body_text
+    -- always stays inline (FTS/snippets/embeddings).
+    html_content_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS message_raw (
@@ -288,7 +292,12 @@ CREATE TABLE IF NOT EXISTS message_raw (
     raw_format TEXT NOT NULL,
 
     compression TEXT DEFAULT 'zlib',
-    encryption_version INTEGER DEFAULT 0
+    encryption_version INTEGER DEFAULT 0,
+
+    -- Externalized raw content: non-NULL means the exact raw bytes live in
+    -- the attachment CAS under this lowercase-hex SHA-256 and raw_data
+    -- holds a zero-length value (kept NOT NULL to match SQLite).
+    content_hash TEXT
 );
 
 -- ============================================================================

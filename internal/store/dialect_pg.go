@@ -363,6 +363,12 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		// (CURRENT_TIMESTAMP at the time the column is added); the triggers
 		// created by EnsureTriggers keep it current thereafter.
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS last_modified TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`, "last_modified"},
+		// Externalized content hashes (message-raw-externalization-design.md):
+		// raw MIME and rendered HTML move into the attachment CAS; a non-NULL
+		// hash marks the row externalized. NULL default = every legacy row
+		// reads as inline. No backfill.
+		{`ALTER TABLE message_raw ADD COLUMN IF NOT EXISTS content_hash TEXT`, "content_hash"},
+		{`ALTER TABLE message_bodies ADD COLUMN IF NOT EXISTS html_content_hash TEXT`, "html_content_hash"},
 	}
 }
 
