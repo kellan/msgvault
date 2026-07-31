@@ -5,7 +5,10 @@ backup repository, with on-demand ranged reads through the daemon, so a
 laptop keeps full search/browse/analytics locally while the bulk of archive
 bytes live on cheap remote storage.
 
-Written 2026-07-31. Status: draft for review.
+Written 2026-07-31. Status: draft for review. Amended 2026-07-31 with
+real-archive sizing that reorders delivery: raw-MIME externalization is
+promoted from follow-up to prerequisite (see "Real-archive sizing" at the
+end).
 
 ## Motivation
 
@@ -494,6 +497,9 @@ ladder.
 
 ## Delivery order
 
+Superseded by the amended order under "Real-archive sizing (2026-07-31)"
+below; the original order is kept for the record.
+
 1. **Kit**: widen `pack.Reader` to `io.ReaderAt` +
    `NewReaderFromReaderAt`; release and bump msgvault's dependency.
 2. `internal/objstore` with `file://` + `https://` backends and the
@@ -508,3 +514,96 @@ ladder.
 6. `s3://` backend (SigV4 signer) + `docs/usage/offload.md` +
    `docs/configuration.md` section + stats/observability additions.
 7. Follow-up design: `message_raw` externalization into the CAS.
+
+## Real-archive sizing (2026-07-31)
+
+Measured on a real ~20-year multi-account archive after this design was
+first drafted:
+
+```
+25.6 GB      1 file      msgvault.db
+ 3.9 GB   8727 files     attachments/
+40.3 MB     23 files     analytics/
+ 3.7 MB     13 files     deletions/
+```
+
+The database is **87%** of the footprint; the attachment store — the sole
+offload target of the original delivery order — is 13%. Attachment tiering
+alone would shrink this archive from 29.5 GB to ~25.7 GB, which does not
+meet goal 1 in any meaningful way.
+
+The dominant share of the database is expected to be `message_raw`: raw
+MIME carries a base64-encoded copy of every attachment inline (base64 of
+already-compressed media survives zlib mostly intact, costing roughly the
+attachment store again plus ~30%), on top of the text content and
+transport framing for every message. `message_bodies`, the FTS5 index, and
+— when vector search is enabled — embedding tables are the other
+candidates. Before implementation starts, the split must be confirmed on
+the target archive with per-table page accounting:
+
+```bash
+sqlite3 msgvault.db \
+  "SELECT name, SUM(pgsize)/1024/1024 AS mib FROM dbstat
+   GROUP BY name ORDER BY mib DESC LIMIT 15;"
+```
+
+(Requires a sqlite3 build with dbstat; `sqlite3_analyzer` is the
+alternative.)
+
+### Consequences for this design
+
+1. **Raw-MIME externalization is promoted from follow-up to
+   prerequisite.** The original order shipped attachment offload first and
+   deferred `message_raw`; on real numbers that inverts the value. The
+   externalization itself (nullable `raw_data`, stub rows for the
+   presence-only joins, a `RawStore` seam mirroring `AttachmentBlobStore`,
+   app-mediated copies for `dedup.go:292` / `subset.go:457` /
+   `migrations.go:107`) still deserves its own short design, but it is now
+   on the critical path, and the remote-tier machinery in this document is
+   built for it from day one: once raw MIME lives in the CAS keyed by its
+   content SHA-256, it is just another blob to capture, offload, and fetch
+   — same catalog, same decorator, same safety ladder. A `raw:` usage-class
+   marker in `blob_offload` (or simply the absence of an `attachments` row)
+   distinguishes reporting, nothing else.
+2. **Backup capture must enumerate externalized raw blobs.**
+   `frozenView.ContentInfo` (`internal/backupapp/app.go:135-190`) builds
+   the content-blob set from `attachments.content_hash`/`thumbnail_hash`
+   only; externalized `message_raw` blobs must join that enumeration so
+   the repository holds them as content-addressed blobs rather than as
+   database pages. This is the scoped `backupapp`/schema-query change that
+   makes the offload invariant ("offload-eligible ⇒ present in repo")
+   hold for raw MIME.
+3. **The database must be compacted after externalization, and the
+   repository re-baselined.** Moving ~20 GB out of SQLite leaves free
+   pages; a `VACUUM` (or equivalent compact) is required to realize the
+   local shrink, and — per the existing purge guidance in
+   `docs/usage/backup.md` — earlier snapshots still hold the raw MIME as
+   pages, so the repository temporarily stores that content twice (as old
+   pages and as new blobs) until retention/prune ships. Acceptable, but it
+   must be stated in the user docs; users tight on remote space can seed a
+   fresh repository after the migration.
+4. **Expected end state on the measured archive**: local footprint of
+   roughly 2–6 GB (metadata, FTS, bodies, analytics, plus the bounded
+   fetch cache), with ~24 GB of raw MIME and attachment content resident
+   only in the repository — against ~1 GB/month-class object-storage cost
+   at current provider pricing.
+5. **Eviction selection for raw MIME is per message**, directly on
+   `messages.internal_date` (`offload --before` needs no reference-age
+   join as attachments do), which makes the date policy exact for the
+   class that dominates the bytes.
+
+### Amended delivery order
+
+1. **Kit**: widen `pack.Reader` to `io.ReaderAt` + `NewReaderFromReaderAt`.
+2. **Companion design + migration: externalize `message_raw` into the
+   attachment CAS** (nullable column, stub rows, `RawStore` seam,
+   `ContentInfo` enumeration, compact step). Ships value on its own:
+   raw MIME stops being double-stored inside DB page deltas, and nightly
+   backups shrink.
+3. `internal/objstore` (`file://`, `https://`) + contract suite.
+4. `internal/remoterepo` read-only client.
+5. `blob_offload` catalog + decorator + serve wiring + API/web state,
+   covering attachment *and* raw blobs uniformly.
+6. `msgvault offload` / `status` / `restore` with the verified-eviction
+   ladder.
+7. `s3://` backend, user docs, stats/observability.
