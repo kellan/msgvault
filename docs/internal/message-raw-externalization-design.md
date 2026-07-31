@@ -239,34 +239,35 @@ The split, measured 2026-07-31: `body_text` ~1.8 GiB, `body_html`
 **~10.3 GiB** — 40% of the whole database, the single largest cost in
 the archive.
 
-**Decided direction: drop-and-derive, guarded by raw availability.** A
-follow-up phase NULLs `body_html` for every message that has a
-`message_raw` row (post-externalization: a raw content hash), and the
-detail view re-derives HTML on demand — fetch the raw blob (local CAS
-or tier), run the existing MIME parse, render. Rationale over
-externalizing the HTML as its own blob class: the bytes already exist
-inside the raw MIME, so externalization would store the same content
-twice in the repository forever; derivation costs milliseconds of parse
-on a PK-lookup-only path and nothing at rest. Rows whose message has no
-raw content keep `body_html` untouched — derived data is only dropped
-where its source is provably held. The guard population must be
-measured before the phase is scoped:
+**Decided direction (2026-07-31): externalize `body_html` into the CAS,
+exactly like raw MIME.** The column becomes nullable alongside a
+`html_content_hash` column; migration hashes each stored HTML value,
+writes it as a CAS blob, records the hash, and NULLs the column — the
+same batched, resumable, verify-readback shape as `externalize-raw`,
+sharing its machinery. The detail view resolves the hash through the
+same `RawBlobOpener`-style seam (local CAS or tier), so offloaded HTML
+is served from the repository transparently. This preserves the
+invariant every other phase holds: bytes move, nothing is deleted, and
+`offload restore` reverses any placement decision byte-for-byte.
 
-```sql
-SELECT COUNT(*), SUM(LENGTH(body_html))/1024/1024 AS orphan_html_mib
-FROM message_bodies mb
-WHERE mb.body_html IS NOT NULL AND mb.body_html != ''
-  AND NOT EXISTS (SELECT 1 FROM message_raw mr WHERE mr.message_id = mb.message_id);
-```
+The accepted cost is duplication at rest in the repository — the HTML
+also exists inside each message's raw MIME — mitigated by pack-level
+zstd (HTML compresses hard) and by CAS deduplication of identical
+bodies. A more aggressive alternative was considered and deliberately
+deferred to a future work stream: *verified drop-and-derive*, where
+migration re-parses the raw MIME and drops stored HTML only when the
+fresh derivation is byte-identical (falling back to externalization on
+mismatch — e.g. rows touched by historical `repair-encoding` runs).
+That would eliminate the duplication, but it changes the safety story
+from byte-preservation to proven recomputation and deserves its own
+design when revisited. Externalization loses nothing toward it: a
+future drop phase would simply garbage-collect HTML blobs whose
+derivation check passes.
 
-Two constraints carry over from the store survey: the phase touches only
-the `body_html` column, never the row or `body_text` (the
-`message_bodies` FTS triggers at `schema.sql:354-361` fire on body
-rows); and derivation must reproduce the charset/encoding handling the
-original parse applied, verified by a before/after render-equivalence
-test on a real-archive sample, since historical `repair-encoding` runs
-may have touched stored HTML that a fresh parse would derive
-differently.
+Standing constraint from the store survey either way: the phase touches
+only the `body_html` column, never the row or `body_text` — the
+`message_bodies` FTS triggers (`schema.sql:354-361`) fire on body rows,
+and `body_text` stays local as FTS/snippet/embedding input.
 
 ## Testing
 
