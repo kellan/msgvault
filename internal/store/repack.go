@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.kenn.io/kit/pack"
@@ -50,7 +51,12 @@ const listPackUsageSQL = `
 func (s *Store) ListPackUsage(ctx context.Context) ([]PackUsage, error) {
 	var usage []PackUsage
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		rows, err := tx.QueryContext(ctx, listPackUsageSQL)
+		usageSQL := listPackUsageSQL
+		if !s.hasExternalizedColumns() {
+			usageSQL = strings.Replace(usageSQL,
+				attachmentReferencedHashesSQL, attachmentReferencedHashesBaseSQL, 1)
+		}
+		rows, err := tx.QueryContext(ctx, usageSQL)
 		if err != nil {
 			return fmt.Errorf("list attachment pack usage: %w", err)
 		}
@@ -118,7 +124,7 @@ func (s *Store) ListReferencedPackEntries(ctx context.Context, packID string) ([
 			FROM attachment_pack_index i
 			WHERE i.pack_id = ?
 			  AND (
-			      i.blob_hash IN (`+attachmentReferencedHashesSQL+`)
+			      i.blob_hash IN (`+s.referencedHashesSQL()+`)
 			      OR i.blob_hash != LOWER(i.blob_hash)
 			  )
 			ORDER BY i.pack_offset, i.blob_hash`, packID)
@@ -164,7 +170,7 @@ func (s *Store) CommitRepack(
 				SELECT i.blob_hash
 				FROM attachment_pack_index i
 				WHERE i.pack_id = ?
-				  AND i.blob_hash IN (`+attachmentReferencedHashesSQL+`)`, sourcePackID)
+				  AND i.blob_hash IN (`+s.referencedHashesSQL()+`)`, sourcePackID)
 			if err != nil {
 				return fmt.Errorf("list current referenced mappings for %s: %w", sourcePackID, err)
 			}
@@ -229,7 +235,7 @@ func (s *Store) CommitRepack(
 			if err := tx.QueryRowContext(ctx, `
 				SELECT COUNT(*) FROM attachment_pack_index i
 				WHERE i.pack_id = ?
-				  AND i.blob_hash IN (`+attachmentReferencedHashesSQL+`)`, sourcePackID).Scan(&remaining); err != nil {
+				  AND i.blob_hash IN (`+s.referencedHashesSQL()+`)`, sourcePackID).Scan(&remaining); err != nil {
 				return fmt.Errorf("verify source pack %s is empty: %w", sourcePackID, err)
 			}
 			if remaining != 0 {
@@ -324,7 +330,7 @@ func (s *Store) DeleteEmptyPackRecord(ctx context.Context, packID string) (bool,
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM attachment_pack_index i
 			WHERE i.pack_id = ?
-			  AND i.blob_hash IN (`+attachmentReferencedHashesSQL+`)`, packID).Scan(&live); err != nil {
+			  AND i.blob_hash IN (`+s.referencedHashesSQL()+`)`, packID).Scan(&live); err != nil {
 			return fmt.Errorf("count referenced mappings for pack %s: %w", packID, err)
 		}
 		if live != 0 {

@@ -34,12 +34,22 @@ func seedDB(t *testing.T) string {
 		`CREATE TABLE attachments (id INTEGER PRIMARY KEY,
 			content_hash TEXT, storage_path TEXT,
 			thumbnail_hash TEXT, thumbnail_path TEXT, size INTEGER)`,
+		`CREATE TABLE message_raw (message_id INTEGER PRIMARY KEY,
+			raw_data BLOB NOT NULL, content_hash TEXT)`,
+		`CREATE TABLE message_bodies (message_id INTEGER PRIMARY KEY,
+			body_text TEXT, body_html TEXT, html_content_hash TEXT)`,
 		`INSERT INTO messages (sent_at) VALUES
 			('2024-01-01T00:00:00Z'), ('2024-06-01T00:00:00Z')`,
 		`INSERT INTO attachments
 			(content_hash, storage_path, thumbnail_hash, thumbnail_path, size) VALUES
 			('aabb01', 'aa/aabb01', 'ccdd02', 'cc/ccdd02', 10),
 			('eeff03', 'imports/eeff03', NULL, NULL, 20)`,
+		// One externalized raw row and one externalized HTML row; the
+		// second raw row is inline (NULL hash) and must not be enumerated.
+		`INSERT INTO message_raw (message_id, raw_data, content_hash) VALUES
+			(1, X'', 'ffee04'), (2, X'AABB', NULL)`,
+		`INSERT INTO message_bodies (message_id, body_text, body_html, html_content_hash) VALUES
+			(1, 'text', NULL, 'ddcc05'), (2, 'text', '<p>inline</p>', NULL)`,
 	} {
 		_, err := db.Exec(stmt)
 		require.NoError(t, err, "seed: %s", stmt)
@@ -60,9 +70,19 @@ func TestFrozenViewContentInfoAndStats(t *testing.T) {
 
 	info, err := view.ContentInfo(context.Background())
 	require.NoError(err)
-	assert.Len(info.Refs, 3) // 2 content hashes + 1 thumbnail
+	// 2 content hashes + 1 thumbnail + 1 externalized raw + 1 externalized HTML
+	require.Len(info.Refs, 5)
 	assert.Equal(int64(2), info.Rows)
 	assert.True(info.NonCanonicalPaths) // 'imports/eeff03'
+	byHash := map[string]backup.ContentRef{}
+	for _, ref := range info.Refs {
+		byHash[ref.Hash] = ref
+	}
+	require.Contains(byHash, "ffee04")
+	assert.Equal("ff/ffee04", byHash["ffee04"].StoragePath,
+		"externalized refs carry the canonical CAS path")
+	require.Contains(byHash, "ddcc05")
+	assert.Equal("dd/ddcc05", byHash["ddcc05"].StoragePath)
 
 	raw, err := view.Stats(context.Background())
 	require.NoError(err)
@@ -70,7 +90,8 @@ func TestFrozenViewContentInfoAndStats(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(int64(2), stats.Messages)
 	assert.Equal(int64(2), stats.AttachmentRows)
-	assert.Equal(int64(3), stats.AttachmentBlobs)
+	assert.Equal(int64(5), stats.AttachmentBlobs,
+		"blob count must equal len(ContentInfo.Refs) — restore's manifest check depends on it")
 	assert.Equal("2024-01-01T00:00:00Z", stats.DateRange[0])
 
 	// Stats marshaling must be stable: ParseStats→Marshal reproduces raw.

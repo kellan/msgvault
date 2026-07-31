@@ -453,6 +453,9 @@ func copyData(tx *sql.Tx, rowCount int, includeIdentity bool) (*CopyResult, erro
 		return nil, fmt.Errorf("copy message_bodies: %w", err)
 	}
 
+	// SELECT * carries the externalization hash columns; like attachment
+	// rows, subset copies pointers only — CAS blob files are outside its
+	// scope on both the attachment and externalized-content paths.
 	if _, err := tx.Exec(`
 		INSERT INTO message_raw SELECT * FROM src.message_raw
 		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {

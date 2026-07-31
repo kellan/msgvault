@@ -1,0 +1,342 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Externalized content row states
+// (docs/internal/message-raw-externalization-design.md): a row is inline
+// when its hash column is NULL and externalized when it names a CAS blob.
+// message_raw.raw_data keeps its NOT NULL constraint (dropping it would
+// force a full-table rebuild in SQLite), so externalized rows hold a
+// zero-length blob; message_bodies.body_html is nullable and is set NULL.
+
+// hasExternalizedColumns reports whether this database carries the
+// externalization hash columns. Pre-externalization databases reached
+// through read-only opens or snapshot restores never migrate, so reference
+// queries fall back to the base (attachments-only) arms there instead of
+// erroring on a missing column. The flag is probed at open time and set by
+// InitSchema's migrations — never queried here, because callers hold open
+// transactions (a probe query would deadlock a single-connection store).
+func (s *Store) hasExternalizedColumns() bool {
+	return s.extColumnsPresent.Load()
+}
+
+// probeExternalizedColumns detects the externalization hash columns at
+// open time, before any transaction can be in flight.
+func (s *Store) probeExternalizedColumns() {
+	query := `SELECT COUNT(*) FROM pragma_table_info('message_raw') WHERE name = 'content_hash'`
+	if s.IsPostgreSQL() {
+		query = `SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_name = 'message_raw' AND column_name = 'content_hash'`
+	}
+	var n int
+	if err := s.db.QueryRow(query).Scan(&n); err == nil && n > 0 {
+		s.extColumnsPresent.Store(true)
+	}
+}
+
+// RawBlobWriter durably stores content under its hash in the CAS,
+// reporting whether an identical blob already existed.
+type RawBlobWriter func(hash string, content []byte) (deduped bool, err error)
+
+// SetRawBlobWriter installs the CAS writer used for CAS-native raw writes
+// on archives whose inline content has been fully externalized. Without a
+// writer, new raw content is stored inline (safe: a later externalize run
+// migrates it), never dropped.
+func (s *Store) SetRawBlobWriter(write RawBlobWriter) { s.rawBlobWriter = write }
+
+// WriteLooseCASBlob durably writes content at dir's canonical CAS path
+// (hash[:2]/hash), verifying by readback before reporting success. An
+// existing file is verified against the hash instead of rewritten
+// (content-addressed dedup); a mismatch is corruption and fails loudly.
+func WriteLooseCASBlob(dir, hash string, content []byte) (deduped bool, err error) {
+	if len(hash) != 64 {
+		return false, fmt.Errorf("write CAS blob: malformed hash %q", hash)
+	}
+	for _, c := range hash {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false, fmt.Errorf("write CAS blob: malformed hash %q", hash)
+		}
+	}
+	target := filepath.Join(dir, hash[:2], hash)
+	if _, statErr := os.Stat(target); statErr == nil {
+		existing, readErr := os.ReadFile(target)
+		if readErr != nil {
+			return false, fmt.Errorf("verify existing blob %s: %w", hash, readErr)
+		}
+		if sum := sha256.Sum256(existing); hex.EncodeToString(sum[:]) != hash {
+			return false, fmt.Errorf("existing blob %s does not match its hash; refusing to reuse", hash)
+		}
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".cas-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(content)
+	if err := errors.Join(writeErr, tmp.Sync(), tmp.Close()); err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	written, err := os.ReadFile(tmpName)
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	if sum := sha256.Sum256(written); hex.EncodeToString(sum[:]) != hash {
+		_ = os.Remove(tmpName)
+		return false, fmt.Errorf("blob %s readback mismatch", hash)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	return false, nil
+}
+
+// LooseCASWriter returns a RawBlobWriter rooted at dir.
+func LooseCASWriter(dir string) RawBlobWriter {
+	return func(hash string, content []byte) (bool, error) {
+		return WriteLooseCASBlob(dir, hash, content)
+	}
+}
+
+// RawBlobOpener resolves an externalized content hash to a verified
+// stream. The daemon wires it to the tiered attachment blob store, so
+// externalized content that has additionally been offloaded is served from
+// the backup repository transparently; local commands that own an archive
+// wire a process-local attachment store.
+type RawBlobOpener func(ctx context.Context, hash string) (io.ReadCloser, int64, error)
+
+// SetRawBlobOpener installs the opener. Call once at startup before the
+// store serves reads; a store holding externalized rows with no opener
+// fails those reads loudly rather than returning empty content.
+func (s *Store) SetRawBlobOpener(open RawBlobOpener) { s.rawBlobOpener = open }
+
+// openExternalContent buffers one externalized blob through the opener.
+// The stream must reach EOF for the CAS verification to complete, which
+// io.ReadAll guarantees; Close reports verification failures.
+func (s *Store) openExternalContent(ctx context.Context, hash, what string) ([]byte, error) {
+	if s.rawBlobOpener == nil {
+		return nil, fmt.Errorf(
+			"%s is externalized to the content store (hash %s) but no blob opener is configured; "+
+				"read through the msgvault daemon, or run this command on the archive host", what, hash)
+	}
+	rc, _, err := s.rawBlobOpener(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("open externalized %s %s: %w", what, hash, err)
+	}
+	data, readErr := io.ReadAll(rc)
+	if err := errors.Join(readErr, rc.Close()); err != nil {
+		return nil, fmt.Errorf("read externalized %s %s: %w", what, hash, err)
+	}
+	return data, nil
+}
+
+// MarkMessageRawExternalized records that messageID's raw content lives in
+// the CAS under hash, emptying the inline bytes in the same statement. The
+// caller must have made the blob durable (and verified it) first: a crash
+// between blob write and this update leaves at worst an unreferenced blob,
+// never a row pointing at nothing.
+func (s *Store) MarkMessageRawExternalized(ctx context.Context, messageID int64, hash string) error {
+	hash = strings.ToLower(hash)
+	if hash == "" {
+		return errors.New("mark message raw externalized: empty content hash")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE message_raw
+		SET content_hash = ?, raw_data = ?, compression = 'none'
+		WHERE message_id = ?`, hash, []byte{}, messageID)
+	if err != nil {
+		return fmt.Errorf("mark message raw externalized %d: %w", messageID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark message raw externalized %d: %w", messageID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("mark message raw externalized %d: no message_raw row", messageID)
+	}
+	return nil
+}
+
+// MarkBodyHTMLExternalized records that messageID's rendered HTML lives in
+// the CAS under hash and clears the inline column. body_text is never
+// touched: it stays inline as FTS/snippet/embedding input.
+func (s *Store) MarkBodyHTMLExternalized(ctx context.Context, messageID int64, hash string) error {
+	hash = strings.ToLower(hash)
+	if hash == "" {
+		return errors.New("mark body html externalized: empty content hash")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE message_bodies
+		SET html_content_hash = ?, body_html = NULL
+		WHERE message_id = ?`, hash, messageID)
+	if err != nil {
+		return fmt.Errorf("mark body html externalized %d: %w", messageID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark body html externalized %d: %w", messageID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("mark body html externalized %d: no message_bodies row", messageID)
+	}
+	return nil
+}
+
+// MessageRawExternalHash returns the CAS hash for messageID's raw content,
+// "" when the row is inline, and hasRow=false when no raw row exists.
+func (s *Store) MessageRawExternalHash(ctx context.Context, messageID int64) (hash string, hasRow bool, err error) {
+	var h sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT content_hash FROM message_raw WHERE message_id = ?`, messageID).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("message raw external hash %d: %w", messageID, err)
+	}
+	return h.String, true, nil
+}
+
+// BodyHTMLExternalHash returns the CAS hash for messageID's rendered HTML,
+// "" when inline (or absent), and hasRow=false when no body row exists.
+func (s *Store) BodyHTMLExternalHash(ctx context.Context, messageID int64) (hash string, hasRow bool, err error) {
+	var h sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT html_content_hash FROM message_bodies WHERE message_id = ?`, messageID).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("body html external hash %d: %w", messageID, err)
+	}
+	return h.String, true, nil
+}
+
+// ListInlineRawBatch returns up to limit message IDs whose raw content is
+// still inline, in stable ID order. Externalizing a row removes it from
+// the predicate, so repeated batches walk the remainder without an offset.
+func (s *Store) ListInlineRawBatch(ctx context.Context, limit int) ([]int64, error) {
+	return s.listIDs(ctx, `
+		SELECT message_id FROM message_raw
+		WHERE content_hash IS NULL
+		ORDER BY message_id LIMIT ?`, limit)
+}
+
+// ListInlineHTMLBatch returns up to limit message IDs whose rendered HTML
+// is still inline and non-empty.
+func (s *Store) ListInlineHTMLBatch(ctx context.Context, limit int) ([]int64, error) {
+	return s.listIDs(ctx, `
+		SELECT message_id FROM message_bodies
+		WHERE html_content_hash IS NULL AND body_html IS NOT NULL AND body_html != ''
+		ORDER BY message_id LIMIT ?`, limit)
+}
+
+func (s *Store) listIDs(ctx context.Context, query string, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list inline externalizable rows: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan inline externalizable row: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate inline externalizable rows: %w", err)
+	}
+	return ids, nil
+}
+
+// GetBodyHTMLInline returns the inline rendered HTML for messageID ("" when
+// absent or already externalized).
+func (s *Store) GetBodyHTMLInline(ctx context.Context, messageID int64) (string, error) {
+	var html sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT body_html FROM message_bodies WHERE message_id = ?`, messageID).Scan(&html)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get inline body html %d: %w", messageID, err)
+	}
+	return html.String, nil
+}
+
+// archiveExternalizedKey marks an archive whose inline content has been
+// fully externalized; new syncs then write CAS-native.
+const archiveExternalizedKey = "externalized_content"
+
+// SetArchiveExternalized records the completion marker and flips this
+// store to CAS-native raw writes.
+func (s *Store) SetArchiveExternalized(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO archive_metadata (key, value) VALUES (?, 'v1')
+		ON CONFLICT (key) DO NOTHING`, archiveExternalizedKey)
+	if err != nil {
+		return fmt.Errorf("set archive externalized marker: %w", err)
+	}
+	s.casNativeRaw.Store(true)
+	return nil
+}
+
+// probeCASNativeRaw loads the externalized marker at open time: the flag
+// is consulted on the raw write path, which may run inside transactions
+// where a probe query could deadlock a single-connection store.
+func (s *Store) probeCASNativeRaw() {
+	var value string
+	if err := s.db.QueryRow(`
+		SELECT value FROM archive_metadata WHERE key = ?`,
+		archiveExternalizedKey).Scan(&value); err == nil && value != "" {
+		s.casNativeRaw.Store(true)
+	}
+}
+
+// ArchiveExternalized reports whether the completion marker is set.
+func (s *Store) ArchiveExternalized(ctx context.Context) (bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT value FROM archive_metadata WHERE key = ?`, archiveExternalizedKey).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read archive externalized marker: %w", err)
+	}
+	return value != "", nil
+}
+
+// CountInlineExternalizable reports how many message_raw and message_bodies
+// rows still hold inline content the externalize command could move.
+func (s *Store) CountInlineExternalizable(ctx context.Context) (rawRows, htmlRows int64, err error) {
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM message_raw WHERE content_hash IS NULL`).Scan(&rawRows); err != nil {
+		return 0, 0, fmt.Errorf("count inline raw rows: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM message_bodies
+		WHERE html_content_hash IS NULL AND body_html IS NOT NULL AND body_html != ''`).Scan(&htmlRows); err != nil {
+		return 0, 0, fmt.Errorf("count inline html rows: %w", err)
+	}
+	return rawRows, htmlRows, nil
+}

@@ -463,12 +463,53 @@ func (s *Store) GetAttachmentPackEntry(blobHash string) (*PackIndexEntry, error)
 	return &entry, nil
 }
 
-const attachmentReferencedHashesSQL = `
+// attachmentReferencedHashesBaseSQL enumerates the attachment-row blob
+// references (content and thumbnails) — the arms every msgvault database
+// has, including pre-externalization archives reached through read-only
+// opens or snapshot restores.
+const attachmentReferencedHashesBaseSQL = `
 	SELECT LOWER(content_hash) FROM attachments
 	WHERE content_hash IS NOT NULL AND content_hash != ''
 	UNION
 	SELECT LOWER(thumbnail_hash) FROM attachments
 	WHERE thumbnail_hash IS NOT NULL AND thumbnail_hash != ''`
+
+// externalizedReferencedHashesArmsSQL adds externalized raw MIME and
+// rendered HTML references (message-raw-externalization-design.md). Only
+// valid on databases whose schema carries the hash columns.
+const externalizedReferencedHashesArmsSQL = `
+	UNION
+	SELECT LOWER(content_hash) FROM message_raw
+	WHERE content_hash IS NOT NULL AND content_hash != ''
+	UNION
+	SELECT LOWER(html_content_hash) FROM message_bodies
+	WHERE html_content_hash IS NOT NULL AND html_content_hash != ''`
+
+// attachmentReferencedHashesSQL is the full reference enumeration for
+// schema-current databases.
+const attachmentReferencedHashesSQL = attachmentReferencedHashesBaseSQL +
+	externalizedReferencedHashesArmsSQL
+
+// referencedHashesSQL picks the enumeration this database's schema supports.
+func (s *Store) referencedHashesSQL() string {
+	if s.hasExternalizedColumns() {
+		return attachmentReferencedHashesSQL
+	}
+	return attachmentReferencedHashesBaseSQL
+}
+
+const resolveAttachmentBlobBaseSQL = `
+	WITH requested(blob_hash) AS (VALUES (CAST(? AS TEXT)))
+	SELECT CASE WHEN (
+	           EXISTS (SELECT 1 FROM attachments a
+	                   WHERE LOWER(a.content_hash) = ?)
+	           OR EXISTS (SELECT 1 FROM attachments a
+	                      WHERE LOWER(a.thumbnail_hash) = ?)
+	       ) THEN 1 ELSE 0 END,
+	       p.blob_hash, p.pack_id, p.pack_offset,
+	       p.stored_len, p.raw_len, p.flags, p.crc32c
+	FROM requested
+	LEFT JOIN attachment_pack_index p ON p.blob_hash = requested.blob_hash`
 
 const resolveAttachmentBlobSQL = `
 	WITH requested(blob_hash) AS (VALUES (CAST(? AS TEXT)))
@@ -477,6 +518,10 @@ const resolveAttachmentBlobSQL = `
 	                   WHERE LOWER(a.content_hash) = ?)
 	           OR EXISTS (SELECT 1 FROM attachments a
 	                      WHERE LOWER(a.thumbnail_hash) = ?)
+	           OR EXISTS (SELECT 1 FROM message_raw mr
+	                      WHERE LOWER(mr.content_hash) = ?)
+	           OR EXISTS (SELECT 1 FROM message_bodies mb
+	                      WHERE LOWER(mb.html_content_hash) = ?)
 	       ) THEN 1 ELSE 0 END,
 	       p.blob_hash, p.pack_id, p.pack_offset,
 	       p.stored_len, p.raw_len, p.flags, p.crc32c
@@ -510,8 +555,13 @@ func (s *Store) ResolveAttachmentBlob(blobHash string) (AttachmentBlobLocation, 
 	var referenced int
 	var hash, packID sql.NullString
 	var offset, storedLen, rawLen, flags, crc sql.NullInt64
-	err = s.db.QueryRow(s.dialect.Rebind(resolveAttachmentBlobSQL),
-		canonicalHash, canonicalHash, canonicalHash).
+	resolveSQL := resolveAttachmentBlobSQL
+	args := []any{canonicalHash, canonicalHash, canonicalHash, canonicalHash, canonicalHash}
+	if !s.hasExternalizedColumns() {
+		resolveSQL = resolveAttachmentBlobBaseSQL
+		args = args[:3]
+	}
+	err = s.db.QueryRow(s.dialect.Rebind(resolveSQL), args...).
 		Scan(&referenced, &hash, &packID, &offset, &storedLen, &rawLen, &flags, &crc)
 	if err != nil {
 		return AttachmentBlobLocation{}, fmt.Errorf("resolve attachment blob %s: %w", blobHash, err)
@@ -539,15 +589,28 @@ func (s *Store) ResolveAttachmentBlob(blobHash string) (AttachmentBlobLocation, 
 	return loc, nil
 }
 
-// ListReferencedBlobHashes returns every non-empty content or thumbnail hash
-// named by an attachment row. A hash shared across columns appears once.
+// ListReferencedBlobHashes returns every non-empty blob hash referenced by
+// an attachment row (content or thumbnail) or by externalized raw/HTML
+// content. A hash shared across columns appears once. Original case is
+// preserved for attachment columns (legacy uppercase rows must keep their
+// alias handling); externalized hashes are always written canonical.
 func (s *Store) ListReferencedBlobHashes() (map[string]struct{}, error) {
-	rows, err := s.db.Query(`
+	query := `
 		SELECT content_hash FROM attachments
 		WHERE content_hash IS NOT NULL AND content_hash != ''
 		UNION
 		SELECT thumbnail_hash FROM attachments
-		WHERE thumbnail_hash IS NOT NULL AND thumbnail_hash != ''`)
+		WHERE thumbnail_hash IS NOT NULL AND thumbnail_hash != ''`
+	if s.hasExternalizedColumns() {
+		query += `
+		UNION
+		SELECT content_hash FROM message_raw
+		WHERE content_hash IS NOT NULL AND content_hash != ''
+		UNION
+		SELECT html_content_hash FROM message_bodies
+		WHERE html_content_hash IS NOT NULL AND html_content_hash != ''`
+	}
+	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("list referenced attachment blob hashes: %w", err)
 	}
@@ -574,7 +637,10 @@ func (s *Store) ListReferencedBlobHashes() (map[string]struct{}, error) {
 func (s *Store) PruneUnreferencedPackIndex(ctx context.Context) (int64, error) {
 	var pruned int64
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		res, err := tx.ExecContext(ctx, pruneUnreferencedPackIndexSQL)
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM attachment_pack_index WHERE blob_hash NOT IN (`+
+				s.referencedHashesSQL()+`
+		)`)
 		if err != nil {
 			return fmt.Errorf("prune unreferenced pack index: %w", err)
 		}
@@ -624,7 +690,9 @@ type UnpackedBlob struct {
 
 // ListUnpackedBlobs returns every distinct local (non-URL) content and
 // thumbnail blob that has no attachment_pack_index row, preserving all of its
-// DB-recorded relative candidate paths. Content blobs come first, then blobs
+// DB-recorded relative candidate paths. Offloaded blobs (blob_offload rows)
+// are excluded: their bytes were deliberately evicted to the remote tier, so
+// they are neither packing candidates nor missing. Content blobs come first, then blobs
 // seen only as thumbnails (Size -1); a hash appearing as both is listed once
 // with content and thumbnail paths combined.
 func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
@@ -693,6 +761,8 @@ func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
 		  AND LOWER(storage_path) NOT LIKE 'https://%'
 		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
 		                  WHERE p.blob_hash = LOWER(attachments.content_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(attachments.content_hash))
 		GROUP BY content_hash, storage_path
 		ORDER BY MIN(id), storage_path`, true); err != nil {
 		return nil, err
@@ -706,8 +776,43 @@ func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
 		  AND LOWER(thumbnail_path) NOT LIKE 'https://%'
 		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
 		                  WHERE p.blob_hash = LOWER(attachments.thumbnail_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(attachments.thumbnail_hash))
 		GROUP BY thumbnail_hash, thumbnail_path
 		ORDER BY MIN(id), thumbnail_path`, false); err != nil {
+		return nil, err
+	}
+	// Externalized raw MIME and HTML blobs are written loose at the
+	// CAS-canonical path (hash[:2]/hash) by the externalize command, so
+	// their candidate path is derived rather than recorded. Sizes are
+	// unknown at the row (-1), like thumbnails.
+	if !s.hasExternalizedColumns() {
+		return blobs, nil
+	}
+	if err := collect(`
+		SELECT LOWER(content_hash),
+		       SUBSTR(LOWER(content_hash), 1, 2) || '/' || LOWER(content_hash)
+		FROM message_raw
+		WHERE content_hash IS NOT NULL AND content_hash != ''
+		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
+		                  WHERE p.blob_hash = LOWER(message_raw.content_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(message_raw.content_hash))
+		GROUP BY content_hash
+		ORDER BY MIN(message_id)`, false); err != nil {
+		return nil, err
+	}
+	if err := collect(`
+		SELECT LOWER(html_content_hash),
+		       SUBSTR(LOWER(html_content_hash), 1, 2) || '/' || LOWER(html_content_hash)
+		FROM message_bodies
+		WHERE html_content_hash IS NOT NULL AND html_content_hash != ''
+		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
+		                  WHERE p.blob_hash = LOWER(message_bodies.html_content_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(message_bodies.html_content_hash))
+		GROUP BY html_content_hash
+		ORDER BY MIN(message_id)`, false); err != nil {
 		return nil, err
 	}
 	return blobs, nil

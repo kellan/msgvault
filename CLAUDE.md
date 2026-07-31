@@ -86,6 +86,9 @@ make lint                     # Run linter
 ./msgvault serve                                      # Start HTTP API + scheduled syncs
 
 # Maintenance
+./msgvault externalize                               # Move raw MIME + HTML bodies into the CAS
+./msgvault offload --before 2020-01-01               # Evict repo-verified cold blobs locally
+./msgvault offload status                            # Offloaded counts and bytes
 ./msgvault repair-encoding                            # Fix UTF-8 encoding issues
 ./msgvault repair-dates                              # Preview missing/implausible date repairs
 ./msgvault repair-dates --apply                      # Apply repairs (and rebuild SQLite analytics cache)

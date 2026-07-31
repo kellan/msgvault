@@ -266,6 +266,49 @@ type BackupConfig struct {
 	ZstdLevel int    `toml:"zstd_level"` // 0 (default) or 1-19
 }
 
+// DefaultOffloadMaxSnapshotAgeDays bounds how stale the offload
+// repository's newest snapshot may be before `msgvault offload` refuses to
+// evict local content against it. A stale repository usually means the
+// off-site sync is broken.
+const DefaultOffloadMaxSnapshotAgeDays = 14
+
+// OffloadConfig configures the remote blob tier (see
+// docs/internal/remote-blob-tier-design.md). Repo names the backup
+// repository that offloaded attachment content is read back from: a
+// filesystem path (external drive, NAS mount, rclone mount) or an
+// s3://bucket/prefix URL. S3 credentials come from the standard AWS
+// environment variables, never from this file.
+type OffloadConfig struct {
+	Repo               string `toml:"repo"`                  // Backup repository path or s3:// URL
+	S3Endpoint         string `toml:"s3_endpoint"`           // S3-compatible endpoint override (B2, R2, MinIO)
+	S3Region           string `toml:"s3_region"`             // S3 region (default us-east-1; R2 uses "auto")
+	MaxSnapshotAgeDays int    `toml:"max_snapshot_age_days"` // Refuse offload when the newest snapshot is older
+}
+
+// Enabled reports whether a remote blob tier is configured.
+func (o *OffloadConfig) Enabled() bool { return o.Repo != "" }
+
+// ApplyDefaults restores defaults for omitted or zero-valued settings.
+func (o *OffloadConfig) ApplyDefaults() {
+	if o.MaxSnapshotAgeDays == 0 {
+		o.MaxSnapshotAgeDays = DefaultOffloadMaxSnapshotAgeDays
+	}
+}
+
+// Validate rejects unsupported repository schemes and nonsensical bounds.
+func (o *OffloadConfig) Validate() error {
+	for _, scheme := range []string{"https://", "http://"} {
+		if strings.HasPrefix(o.Repo, scheme) {
+			return fmt.Errorf("[offload] repo %q: %s repositories are not yet supported; "+
+				"use a filesystem path or an s3:// URL", o.Repo, scheme)
+		}
+	}
+	if o.MaxSnapshotAgeDays < 0 {
+		return fmt.Errorf("invalid [offload] max_snapshot_age_days %d (want >= 0)", o.MaxSnapshotAgeDays)
+	}
+	return nil
+}
+
 const (
 	DefaultDiscordMaxMediaBytes    int64         = 50 << 20
 	DefaultDiscordEditRescanWindow time.Duration = 7 * 24 * time.Hour
@@ -332,6 +375,7 @@ type Config struct {
 	Granola      []GranolaSource    `toml:"granola"`
 	Circleback   []CirclebackSource `toml:"circleback"`
 	Backup       BackupConfig       `toml:"backup"`
+	Offload      OffloadConfig      `toml:"offload"`
 	Discord      DiscordConfig      `toml:"discord"`
 
 	// Computed paths (not from config file)
@@ -527,6 +571,7 @@ func NewDefaultConfig() *Config {
 	cfg.Discord.ApplyDefaults()
 	cfg.Web.ApplyDefaults()
 	cfg.Integrations.Tasks.ApplyDefaults()
+	cfg.Offload.ApplyDefaults()
 	return cfg
 }
 
@@ -619,6 +664,11 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 	cfg.OAuth.ServiceAccountKey = expandPath(cfg.OAuth.ServiceAccountKey)
 	cfg.Vector.DBPath = expandPath(cfg.Vector.DBPath)
 	cfg.Backup.Repo = expandPath(cfg.Backup.Repo)
+	// URL-like offload repos are left untouched so Validate can reject the
+	// scheme by name instead of a path-mangled variant of it.
+	if !strings.Contains(cfg.Offload.Repo, "://") {
+		cfg.Offload.Repo = expandPath(cfg.Offload.Repo)
+	}
 	for name, app := range cfg.OAuth.Apps {
 		app.ClientSecrets = expandPath(app.ClientSecrets)
 		app.ServiceAccountKey = expandPath(app.ServiceAccountKey)
@@ -634,6 +684,9 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 		cfg.OAuth.ServiceAccountKey = resolveRelative(cfg.OAuth.ServiceAccountKey, cfg.HomeDir)
 		cfg.Vector.DBPath = resolveRelative(cfg.Vector.DBPath, cfg.HomeDir)
 		cfg.Backup.Repo = resolveRelative(cfg.Backup.Repo, cfg.HomeDir)
+		if !strings.Contains(cfg.Offload.Repo, "://") {
+			cfg.Offload.Repo = resolveRelative(cfg.Offload.Repo, cfg.HomeDir)
+		}
 		for name, app := range cfg.OAuth.Apps {
 			app.ClientSecrets = resolveRelative(app.ClientSecrets, cfg.HomeDir)
 			app.ServiceAccountKey = resolveRelative(app.ServiceAccountKey, cfg.HomeDir)
@@ -664,6 +717,10 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 		return nil, err
 	}
 	if err := cfg.Backup.Validate(); err != nil {
+		return nil, err
+	}
+	cfg.Offload.ApplyDefaults()
+	if err := cfg.Offload.Validate(); err != nil {
 		return nil, err
 	}
 	cfg.applySynctechSMSDefaults()

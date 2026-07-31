@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,22 @@ type Store struct {
 	readOnly      bool // Opened via OpenReadOnly; skips WAL checkpoint on close
 	fts5Available bool // Whether FTS5 is available for full-text search
 	closeCleanup  func()
+	// rawBlobOpener resolves externalized raw/HTML content hashes to
+	// verified streams (message-raw-externalization-design.md). Set once at
+	// startup via SetRawBlobOpener, before the store serves reads.
+	rawBlobOpener RawBlobOpener
+	// rawBlobWriter stores CAS-native raw content on fully externalized
+	// archives (casNativeRaw). Set once at startup.
+	rawBlobWriter RawBlobWriter
+	// casNativeRaw reports the archive_metadata externalized marker: new
+	// raw content is written to the CAS instead of inline.
+	casNativeRaw atomic.Bool
+	// extColumnsPresent caches a positive schema probe for the
+	// externalization hash columns. Read-only opens skip migrations and
+	// restored snapshots are byte-exact, so pre-externalization databases
+	// must keep working with the base reference queries; negatives are
+	// re-probed because a writable open may migrate the schema later.
+	extColumnsPresent atomic.Bool
 }
 
 // synchronous=FULL + fullfsync=true protects WAL writes against OS/power crashes
@@ -155,11 +172,14 @@ func openSQLite(dbPath, params string) (*Store, error) {
 		return nil, fmt.Errorf("init connection: %w", err)
 	}
 
-	return &Store{
+	s := &Store{
 		db:      newLoggedDB(db, dialect.Rebind),
 		dbPath:  dbPath,
 		dialect: dialect,
-	}, nil
+	}
+	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
+	return s, nil
 }
 
 // openPostgres opens a PostgreSQL database using the given connection URL.
@@ -187,12 +207,15 @@ func openPostgres(dbURL string) (*Store, error) {
 		return nil, fmt.Errorf("init PostgreSQL connection: %w", err)
 	}
 
-	return &Store{
+	s := &Store{
 		db:           newLoggedDB(db, dialect.Rebind),
 		dbPath:       dbURL,
 		dialect:      dialect,
 		closeCleanup: cleanup,
-	}, nil
+	}
+	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
+	return s, nil
 }
 
 // OpenReadOnly opens an existing database in read-only mode. Suitable for
@@ -242,6 +265,8 @@ func OpenReadOnly(dbPath string) (*Store, error) {
 	}
 
 	s.fts5Available = dialect.FTSAvailable(db)
+	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 
 	return s, nil
 }
@@ -286,6 +311,8 @@ func openPostgresReadOnly(dbURL string) (*Store, error) {
 	}
 
 	s.fts5Available = dialect.FTSAvailable(db)
+	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 
 	return s, nil
 }
@@ -842,6 +869,24 @@ func (s *Store) InitSchema() error {
 			lastModifiedColumnAdded = true
 		}
 	}
+
+	// Expression indexes for the externalization hash columns. Created in
+	// Go rather than schema.sql because the schema executes before the
+	// column migrations above: on a legacy database the columns don't
+	// exist yet at schema time, and CREATE INDEX would fail.
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_message_raw_content_hash_lower
+			ON message_raw (LOWER(content_hash))`,
+		`CREATE INDEX IF NOT EXISTS idx_message_bodies_html_hash_lower
+			ON message_bodies (LOWER(html_content_hash))`,
+	} {
+		if _, err := s.db.Exec(idx); err != nil {
+			return fmt.Errorf("ensure externalized hash index: %w", err)
+		}
+	}
+	// The migrations above guarantee the externalization columns exist,
+	// even when the open-time probe ran against a legacy schema.
+	s.extColumnsPresent.Store(true)
 
 	// Initialize explicit attribution provenance for every legacy message once
 	// under the maintenance timeout escape hatch. Granola and Circleback

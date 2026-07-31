@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/msgvault/internal/attachmenttier"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
 	msgexport "go.kenn.io/msgvault/internal/export"
@@ -2795,6 +2796,11 @@ func (s *Server) handleGetAttachmentContent(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeError(w, http.StatusNotFound, "not_found", "Attachment content not available")
+			return
+		}
+		if errors.Is(err, attachmenttier.ErrRemoteUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "remote_tier_unavailable",
+				"Attachment is offloaded and the backup repository is currently unreachable")
 			return
 		}
 		s.logger.Error("failed to open attachment content", "error", err, "hash", hash)

@@ -112,6 +112,7 @@ func backfillLegacyCalendarAttribution(
 			  AND COALESCE(m.is_from_me, FALSE) = TRUE
 			  AND s.source_type = 'gcal'
 			  AND mr.raw_format = 'gcal_json'
+			  AND mr.content_hash IS NULL
 			  AND m.id > ?
 			ORDER BY m.id
 			LIMIT 500

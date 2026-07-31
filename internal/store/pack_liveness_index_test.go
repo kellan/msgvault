@@ -24,7 +24,7 @@ func TestAttachmentPackLivenessQueriesUseExpressionIndexes(t *testing.T) {
 		indexPrefix string
 	}{
 		"resolve": {
-			plan:        explainPlan(t, st, resolveAttachmentBlobSQL, hash, hash, hash),
+			plan:        explainPlan(t, st, resolveAttachmentBlobSQL, hash, hash, hash, hash, hash),
 			indexPrefix: "SEARCH a USING COVERING INDEX ",
 		},
 		"prune": {
@@ -44,6 +44,19 @@ func TestAttachmentPackLivenessQueriesUseExpressionIndexes(t *testing.T) {
 			assert.Contains(tc.plan, tc.indexPrefix+"idx_attachments_thumbnail_hash_lower",
 				"thumbnail liveness must use its expression index:\n%s", tc.plan)
 			assert.NotContains(tc.plan, "CORRELATED", "liveness must not rescan attachments per mapping:\n%s", tc.plan)
+			assert.NotContains(tc.plan, "SCAN message_raw\n",
+				"externalized raw liveness must use its expression index:\n%s", tc.plan)
+			assert.NotContains(tc.plan, "SCAN message_bodies\n",
+				"externalized html liveness must use its expression index:\n%s", tc.plan)
 		})
 	}
+
+	// The resolve probe is the hot per-read path: its externalized arms
+	// must hit the expression indexes, never scan the (potentially
+	// 400k-row) tables.
+	resolvePlan := explainPlan(t, st, resolveAttachmentBlobSQL, hash, hash, hash, hash, hash)
+	assert.Contains(resolvePlan, "idx_message_raw_content_hash_lower",
+		"raw arm must use its expression index:\n%s", resolvePlan)
+	assert.Contains(resolvePlan, "idx_message_bodies_html_hash_lower",
+		"html arm must use its expression index:\n%s", resolvePlan)
 }

@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -796,11 +798,34 @@ func nullStringValue(ns sql.NullString) string {
 
 // UpsertMessageRaw stores the compressed raw MIME data for a message.
 func (s *Store) UpsertMessageRaw(messageID int64, rawData []byte) error {
-	return upsertMessageRaw(s.db, messageID, rawData)
+	return s.upsertMessageRawStoring(s.db, messageID, rawData, "mime")
 }
 
-func upsertMessageRaw(q querier, messageID int64, rawData []byte) error {
-	return upsertMessageRawWithFormat(q, messageID, rawData, "mime")
+// upsertMessageRawStoring writes raw content CAS-native on fully
+// externalized archives (marker set and a blob writer wired): the blob is
+// made durable first, then the row stores the hash pointer with an empty
+// sentinel. Everywhere else — legacy archives, or a store without a writer
+// — content stays inline, which is always safe: a later externalize run
+// migrates it.
+func (s *Store) upsertMessageRawStoring(q querier, messageID int64, rawData []byte, format string) error {
+	if s.casNativeRaw.Load() && s.rawBlobWriter != nil && len(rawData) > 0 {
+		sum := sha256.Sum256(rawData)
+		hash := hex.EncodeToString(sum[:])
+		if _, err := s.rawBlobWriter(hash, rawData); err != nil {
+			return fmt.Errorf("store raw content blob: %w", err)
+		}
+		_, err := q.Exec(`
+			INSERT INTO message_raw (message_id, raw_data, raw_format, compression, content_hash)
+			VALUES (?, ?, ?, 'none', ?)
+			ON CONFLICT(message_id) DO UPDATE SET
+				raw_data = excluded.raw_data,
+				raw_format = excluded.raw_format,
+				compression = excluded.compression,
+				content_hash = excluded.content_hash
+		`, messageID, []byte{}, format, hash)
+		return err
+	}
+	return upsertMessageRawWithFormat(q, messageID, rawData, format)
 }
 
 func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, format string) error {
@@ -828,13 +853,20 @@ func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, form
 // GetMessageRaw retrieves and decompresses the raw MIME data for a message.
 func (s *Store) GetMessageRaw(messageID int64) ([]byte, error) {
 	var compressed []byte
-	var compression sql.NullString
+	var compression, contentHash sql.NullString
 
 	err := s.db.QueryRow(`
-		SELECT raw_data, compression FROM message_raw WHERE message_id = ?
-	`, messageID).Scan(&compressed, &compression)
+		SELECT raw_data, compression, content_hash FROM message_raw WHERE message_id = ?
+	`, messageID).Scan(&compressed, &compression, &contentHash)
 	if err != nil {
 		return nil, err
+	}
+
+	// Externalized row: the exact raw bytes live in the attachment CAS
+	// (and possibly the remote tier) under content_hash; raw_data is a
+	// zero-length sentinel.
+	if contentHash.Valid && contentHash.String != "" {
+		return s.openExternalContent(context.Background(), contentHash.String, "message raw content")
 	}
 
 	if compression.Valid && compression.String == "zlib" {
@@ -1076,7 +1108,7 @@ func (s *Store) persistMessageWith(
 		if rawFormat == "" {
 			rawFormat = "mime"
 		}
-		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
+		if err := s.upsertMessageRawStoring(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
 		}
 	}
@@ -3081,7 +3113,7 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 // UpsertMessageRawWithFormat stores compressed raw data with an explicit format.
 // Unlike UpsertMessageRaw (which hardcodes 'mime'), this accepts the format as a parameter.
 func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, format string) error {
-	return upsertMessageRawWithFormat(s.db, messageID, rawData, format)
+	return s.upsertMessageRawStoring(s.db, messageID, rawData, format)
 }
 
 // AttachmentPathsUniqueToSource returns local content and thumbnail paths for

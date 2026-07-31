@@ -85,6 +85,22 @@ auto_build_cache = true
 repo = "~/Backups/msgvault"
 zstd_level = 0
 
+[offload]
+# Remote blob tier: a backup repository that serves attachment content
+# evicted locally by `msgvault offload`. A filesystem path (external
+# drive, NAS mount, rclone mount) or an s3://bucket/prefix URL for
+# S3-compatible storage (AWS, B2, R2, MinIO). S3 credentials come from
+# the standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment
+# variables, never from this file. Repository contents are not
+# encrypted, so protect the location accordingly. See `msgvault offload
+# --help` for selection and safety semantics.
+repo = "~/Backups/msgvault"
+# repo = "s3://my-bucket/msgvault-backup"
+# s3_endpoint = "https://s3.us-west-000.backblazeb2.com"  # B2/R2/MinIO
+# s3_region = "us-east-1"
+# Refuse offload when the repository's newest snapshot is older than this.
+max_snapshot_age_days = 14
+
 [remote]
 # Remote msgvault endpoint for CLI remote mode
 url = "http://nas-ip:8080"

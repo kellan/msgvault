@@ -259,13 +259,23 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 	}
 
 	// Get body (single PK lookup — only place we touch message_bodies)
-	var bodyText, bodyHTML sql.NullString
-	err = s.db.QueryRowContext(ctx, "SELECT body_text, body_html FROM message_bodies WHERE message_id = ?", id).Scan(&bodyText, &bodyHTML)
+	var bodyText, bodyHTML, htmlHash sql.NullString
+	err = s.db.QueryRowContext(ctx, "SELECT body_text, body_html, html_content_hash FROM message_bodies WHERE message_id = ?", id).Scan(&bodyText, &bodyHTML, &htmlHash)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get message body: %w", err)
 	}
 	m.BodyText = nullStringValue(bodyText)
 	m.BodyHTML = nullStringValue(bodyHTML)
+	// Externalized HTML resolves through the blob opener on this single
+	// PK path only — batch views (batchPopulateBodies) stay text-only by
+	// design, never paying a per-message blob fetch.
+	if m.BodyHTML == "" && htmlHash.Valid && htmlHash.String != "" {
+		html, err := s.openExternalContent(ctx, htmlHash.String, "message html body")
+		if err != nil {
+			return nil, err
+		}
+		m.BodyHTML = string(html)
+	}
 	if m.BodyText != "" {
 		m.Body = m.BodyText
 	} else {

@@ -298,6 +298,12 @@ func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 		// (NULL would never match `last_modified = ?`). Fresh DBs keep the
 		// CREATE TABLE default in schema.sql, which IS allowed.
 		{`ALTER TABLE messages ADD COLUMN last_modified DATETIME`, "last_modified"},
+		// Externalized content hashes (message-raw-externalization-design.md):
+		// raw MIME and rendered HTML move into the attachment CAS; a non-NULL
+		// hash marks the row externalized. NULL default = every legacy row
+		// reads as inline, which is exactly right. No backfill.
+		{`ALTER TABLE message_raw ADD COLUMN content_hash TEXT`, "content_hash"},
+		{`ALTER TABLE message_bodies ADD COLUMN html_content_hash TEXT`, "html_content_hash"},
 	}
 }
 

@@ -1,0 +1,437 @@
+package store_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
+)
+
+// externalizeFixture creates one message with an inline raw row and an
+// inline body (text + HTML).
+type externalizeFixture struct {
+	st    *store.Store
+	msgID int64
+}
+
+func newExternalizeFixture(t *testing.T) *externalizeFixture {
+	t.Helper()
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	src, err := st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := st.EnsureConversation(src.ID, "ext-thread", "Ext Thread")
+	require.NoError(err)
+	msgID, err := st.UpsertMessage(&store.Message{
+		ConversationID: convID, SourceID: src.ID,
+		SourceMessageID: "ext-msg-1", MessageType: "email",
+	})
+	require.NoError(err)
+	require.NoError(st.UpsertMessageRaw(msgID, []byte("raw mime bytes for externalization")))
+	_, err = st.DB().Exec(st.Rebind(`
+		INSERT INTO message_bodies (message_id, body_text, body_html)
+		VALUES (?, ?, ?)`), msgID, "plain text", "<p>rendered html</p>")
+	require.NoError(err)
+	return &externalizeFixture{st: st, msgID: msgID}
+}
+
+func TestMarkMessageRawExternalized(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("ab", 32)
+
+	// Inline before: hash empty, row present, bytes intact.
+	got, hasRow, err := fx.st.MessageRawExternalHash(ctx, fx.msgID)
+	require.NoError(err)
+	assert.True(hasRow)
+	assert.Empty(got)
+	raw, err := fx.st.GetMessageRaw(fx.msgID)
+	require.NoError(err)
+	assert.Equal("raw mime bytes for externalization", string(raw))
+
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, strings.ToUpper(hash)))
+
+	got, hasRow, err = fx.st.MessageRawExternalHash(ctx, fx.msgID)
+	require.NoError(err)
+	assert.True(hasRow)
+	assert.Equal(hash, got, "hash canonicalizes to lowercase")
+
+	// The inline bytes are gone but the row (and its NOT NULL raw_data)
+	// remains, so every presence-only join keeps working.
+	var rawLen int
+	require.NoError(fx.st.DB().QueryRow(fx.st.Rebind(`
+		SELECT LENGTH(raw_data) FROM message_raw WHERE message_id = ?`), fx.msgID).Scan(&rawLen))
+	assert.Zero(rawLen)
+
+	// Marking a message with no raw row fails loudly.
+	err = fx.st.MarkMessageRawExternalized(ctx, fx.msgID+999, hash)
+	require.Error(err)
+	assert.Contains(err.Error(), "no message_raw row")
+
+	require.Error(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, ""),
+		"empty hash is rejected")
+}
+
+func TestMarkBodyHTMLExternalized(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("cd", 32)
+
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, hash))
+
+	got, hasRow, err := fx.st.BodyHTMLExternalHash(ctx, fx.msgID)
+	require.NoError(err)
+	assert.True(hasRow)
+	assert.Equal(hash, got)
+
+	// body_html is cleared; body_text is untouched (FTS/snippets input).
+	var bodyText string
+	var bodyHTML any
+	require.NoError(fx.st.DB().QueryRow(fx.st.Rebind(`
+		SELECT body_text, body_html FROM message_bodies WHERE message_id = ?`),
+		fx.msgID).Scan(&bodyText, &bodyHTML))
+	assert.Equal("plain text", bodyText)
+	assert.Nil(bodyHTML)
+
+	err = fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID+999, hash)
+	require.Error(err)
+	assert.Contains(err.Error(), "no message_bodies row")
+}
+
+// countingOpener serves blobs from a map and counts opens.
+type countingOpener struct {
+	blobs map[string][]byte
+	opens int
+}
+
+func (c *countingOpener) open(_ context.Context, hash string) (io.ReadCloser, int64, error) {
+	c.opens++
+	content, ok := c.blobs[strings.ToLower(hash)]
+	if !ok {
+		return nil, 0, fmt.Errorf("blob %s not in fake CAS", hash)
+	}
+	return io.NopCloser(bytes.NewReader(content)), int64(len(content)), nil
+}
+
+func TestGetMessageRawExternalizedReadsThroughOpener(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	raw := []byte("raw mime bytes for externalization")
+	hash := strings.Repeat("2a", 32)
+
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+
+	// No opener: loud, actionable failure — never silent empty content.
+	_, err := fx.st.GetMessageRaw(fx.msgID)
+	require.Error(err)
+	assert.Contains(err.Error(), "no blob opener")
+
+	opener := &countingOpener{blobs: map[string][]byte{hash: raw}}
+	fx.st.SetRawBlobOpener(opener.open)
+	got, err := fx.st.GetMessageRaw(fx.msgID)
+	require.NoError(err)
+	assert.Equal(raw, got, "externalized read returns the exact original bytes")
+	assert.Equal(1, opener.opens)
+
+	// Inline rows never touch the opener.
+	fx2 := newExternalizeFixture(t)
+	fx2.st.SetRawBlobOpener(opener.open)
+	got, err = fx2.st.GetMessageRaw(fx2.msgID)
+	require.NoError(err)
+	assert.Equal(raw, got)
+	assert.Equal(1, opener.opens, "inline read must not call the opener")
+}
+
+func TestGetMessageContextResolvesExternalizedHTML(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	html := "<p>rendered html</p>"
+	hash := strings.Repeat("3b", 32)
+
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, hash))
+	opener := &countingOpener{blobs: map[string][]byte{hash: []byte(html)}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	m, err := fx.st.GetMessageContext(ctx, fx.msgID)
+	require.NoError(err)
+	assert.Equal(html, m.BodyHTML, "detail view re-materializes externalized HTML")
+	assert.Equal("plain text", m.BodyText)
+	assert.Equal(1, opener.opens)
+}
+
+func TestConversationWindowNeverFetchesExternalizedHTML(t *testing.T) {
+	// The batch body path feeds conversation rendering; a per-message blob
+	// fetch there would turn one conversation view into N tier round
+	// trips. Batch views are text-only by design.
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("4c", 32)
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, hash))
+
+	opener := &countingOpener{blobs: map[string][]byte{hash: []byte("<p>x</p>")}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	var convID int64
+	require.NoError(fx.st.DB().QueryRow(fx.st.Rebind(
+		`SELECT conversation_id FROM messages WHERE id = ?`), fx.msgID).Scan(&convID))
+	window, err := fx.st.GetConversationWindowContext(ctx, convID, fx.msgID, 10, 10, nil, nil)
+	require.NoError(err)
+	require.NotEmpty(window.Messages)
+	assert.Equal("plain text", window.Messages[0].BodyText)
+	assert.Zero(opener.opens, "batch body population must never open blobs")
+}
+
+func TestExternalizedHashesAreFirstClassReferences(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	rawHash := strings.Repeat("5d", 32)
+	htmlHash := strings.Repeat("6e", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, rawHash))
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, htmlHash))
+
+	// Liveness authority: the resolver recognizes both hashes as members.
+	for _, hash := range []string{rawHash, htmlHash} {
+		loc, err := fx.st.ResolveAttachmentBlob(hash)
+		require.NoError(err)
+		assert.True(loc.Referenced, "externalized hash %s must be a live member", hash)
+	}
+	loc, err := fx.st.ResolveAttachmentBlob(strings.Repeat("9f", 32))
+	require.NoError(err)
+	assert.False(loc.Referenced)
+
+	// Orphan-sweep safety: both hashes are in the reference inventory.
+	refs, err := fx.st.ListReferencedBlobHashes()
+	require.NoError(err)
+	assert.Contains(refs, rawHash)
+	assert.Contains(refs, htmlHash)
+
+	// Pack candidates: both appear with the derived CAS-canonical path.
+	blobs, err := fx.st.ListUnpackedBlobs()
+	require.NoError(err)
+	byHash := map[string]store.UnpackedBlob{}
+	for _, b := range blobs {
+		byHash[b.Hash] = b
+	}
+	require.Contains(byHash, rawHash)
+	assert.Equal([]string{rawHash[:2] + "/" + rawHash}, byHash[rawHash].Paths)
+	require.Contains(byHash, htmlHash)
+	assert.Equal([]string{htmlHash[:2] + "/" + htmlHash}, byHash[htmlHash].Paths)
+
+	// Offloaded externalized blobs leave the candidate list but stay
+	// referenced, exactly like attachments.
+	require.NoError(fx.st.RecordBlobOffload(ctx, store.BlobOffloadRecord{
+		ContentHash: rawHash, RepoID: "repo-one",
+		OffloadedAt: time.Now().UTC(), StoredLen: 10,
+	}))
+	blobs, err = fx.st.ListUnpackedBlobs()
+	require.NoError(err)
+	for _, b := range blobs {
+		assert.NotEqual(rawHash, b.Hash, "offloaded raw blob must not be a pack candidate")
+	}
+	refs, err = fx.st.ListReferencedBlobHashes()
+	require.NoError(err)
+	assert.Contains(refs, rawHash, "offloaded raw blob stays referenced")
+
+	// Prune must not remove pack index rows for externalized blobs.
+	require.NoError(fx.st.RecordPackedBlobs(store.PackRecord{
+		PackID: "01hzy3v7q8r9s0t1a2v3w4x5z9", EntryCount: 1, StoredBytes: 128,
+		CreatedAt: time.Now(),
+	}, []store.PackIndexEntry{{
+		BlobHash: htmlHash, PackID: "01hzy3v7q8r9s0t1a2v3w4x5z9",
+		Offset: 6, StoredLen: 128, RawLen: 256,
+	}}))
+	pruned, err := fx.st.PruneUnreferencedPackIndex(ctx)
+	require.NoError(err)
+	assert.Zero(pruned, "externalized blob's index row is live, not prunable")
+}
+
+func TestStreamMessageRawResolvesExternalizedRows(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	raw := []byte("raw mime bytes for externalization")
+	hash := strings.Repeat("7a", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+	opener := &countingOpener{blobs: map[string][]byte{hash: raw}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	var got []byte
+	var gotComp string
+	require.NoError(fx.st.StreamMessageRaw([]int64{fx.msgID},
+		func(_ int64, rawData []byte, compression string) {
+			got = append([]byte(nil), rawData...)
+			gotComp = compression
+		}))
+	assert.Equal(raw, got, "bulk consumers must see the real bytes, not the sentinel")
+	assert.Equal("none", gotComp)
+	assert.Equal(1, opener.opens)
+}
+
+func TestMergeDuplicatesBackfillsExternalizedRaw(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("8b", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+
+	// A survivor with no raw row: merging the externalized duplicate must
+	// backfill the hash pointer, not the empty sentinel alone.
+	src, err := fx.st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := fx.st.EnsureConversation(src.ID, "ext-thread", "Ext Thread")
+	require.NoError(err)
+	survivorID, err := fx.st.UpsertMessage(&store.Message{
+		ConversationID: convID, SourceID: src.ID,
+		SourceMessageID: "ext-survivor", MessageType: "email",
+	})
+	require.NoError(err)
+
+	_, err = fx.st.MergeDuplicates(survivorID, []int64{fx.msgID}, "batch-ext-1")
+	require.NoError(err)
+
+	gotHash, hasRow, err := fx.st.MessageRawExternalHash(ctx, survivorID)
+	require.NoError(err)
+	assert.True(hasRow, "survivor gained a raw row")
+	assert.Equal(hash, gotHash, "survivor's raw content is the externalized hash pointer")
+}
+
+func TestUpsertMessageRawCASNative(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	st := testutil.NewTestStore(t)
+	casDir := t.TempDir()
+	raw := []byte("cas-native raw mime bytes")
+	sum := sha256.Sum256(raw)
+	wantHash := hex.EncodeToString(sum[:])
+
+	src, err := st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := st.EnsureConversation(src.ID, "cas-thread", "CAS Thread")
+	require.NoError(err)
+	newMsg := func(sid string) int64 {
+		id, err := st.UpsertMessage(&store.Message{
+			ConversationID: convID, SourceID: src.ID,
+			SourceMessageID: sid, MessageType: "email",
+		})
+		require.NoError(err)
+		return id
+	}
+
+	// Marker unset: inline as always, even with a writer wired.
+	st.SetRawBlobWriter(store.LooseCASWriter(casDir))
+	inlineID := newMsg("cas-msg-inline")
+	require.NoError(st.UpsertMessageRaw(inlineID, raw))
+	hash, _, err := st.MessageRawExternalHash(ctx, inlineID)
+	require.NoError(err)
+	assert.Empty(hash, "pre-marker writes stay inline")
+
+	// Marker set + writer: slim row plus durable loose blob.
+	require.NoError(st.SetArchiveExternalized(ctx))
+	nativeID := newMsg("cas-msg-native")
+	require.NoError(st.UpsertMessageRaw(nativeID, raw))
+	hash, _, err = st.MessageRawExternalHash(ctx, nativeID)
+	require.NoError(err)
+	assert.Equal(wantHash, hash)
+	blob, err := os.ReadFile(filepath.Join(casDir, wantHash[:2], wantHash))
+	require.NoError(err)
+	assert.Equal(raw, blob)
+
+	// Round trip through the opener.
+	opener := &countingOpener{blobs: map[string][]byte{wantHash: raw}}
+	st.SetRawBlobOpener(opener.open)
+	got, err := st.GetMessageRaw(nativeID)
+	require.NoError(err)
+	assert.Equal(raw, got)
+
+	// Marker set but no writer: inline fallback, never a failed ingest.
+	st.SetRawBlobWriter(nil)
+	fallbackID := newMsg("cas-msg-fallback")
+	require.NoError(st.UpsertMessageRaw(fallbackID, raw))
+	hash, _, err = st.MessageRawExternalHash(ctx, fallbackID)
+	require.NoError(err)
+	assert.Empty(hash, "writer-less stores fall back to inline")
+	got, err = st.GetMessageRaw(fallbackID)
+	require.NoError(err)
+	assert.Equal(raw, got)
+}
+
+func TestExternalHashLookupsWithoutRows(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	st := testutil.NewTestStore(t)
+
+	_, hasRow, err := st.MessageRawExternalHash(ctx, 12345)
+	require.NoError(err)
+	assert.False(hasRow)
+	_, hasRow, err = st.BodyHTMLExternalHash(ctx, 12345)
+	require.NoError(err)
+	assert.False(hasRow)
+}
+
+func TestCountInlineExternalizable(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+
+	rawRows, htmlRows, err := fx.st.CountInlineExternalizable(ctx)
+	require.NoError(err)
+	assert.Equal(int64(1), rawRows)
+	assert.Equal(int64(1), htmlRows)
+
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, strings.Repeat("ef", 32)))
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, strings.Repeat("01", 32)))
+
+	rawRows, htmlRows, err = fx.st.CountInlineExternalizable(ctx)
+	require.NoError(err)
+	assert.Zero(rawRows)
+	assert.Zero(htmlRows)
+
+	// An empty-HTML row is not externalizable work.
+	src, err := fx.st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := fx.st.EnsureConversation(src.ID, "ext-thread", "Ext Thread")
+	require.NoError(err)
+	msgID2, err := fx.st.UpsertMessage(&store.Message{
+		ConversationID: convID, SourceID: src.ID,
+		SourceMessageID: "ext-msg-2", MessageType: "email",
+	})
+	require.NoError(err)
+	_, err = fx.st.DB().Exec(fx.st.Rebind(fmt.Sprintf(`
+		INSERT INTO message_bodies (message_id, body_text, body_html)
+		VALUES (%d, 'text only', NULL)`, msgID2)))
+	require.NoError(err)
+
+	_, htmlRows, err = fx.st.CountInlineExternalizable(ctx)
+	require.NoError(err)
+	assert.Zero(htmlRows)
+}

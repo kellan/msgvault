@@ -289,9 +289,12 @@ func (s *Store) MergeDuplicates(
 	result := &MergeResult{}
 	unionLabelsSQL := s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO message_labels (message_id, label_id)
 			SELECT ?, label_id FROM message_labels WHERE message_id = ?`)
+	// content_hash rides along so an externalized duplicate backfills the
+	// survivor as a hash pointer — copying the empty raw_data sentinel
+	// without the hash would silently blank the survivor's raw content.
 	backfillRawSQL := s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO message_raw
-			  (message_id, raw_data, raw_format, compression)
-			SELECT ?, raw_data, raw_format, compression
+			  (message_id, raw_data, raw_format, compression, content_hash)
+			SELECT ?, raw_data, raw_format, compression, content_hash
 			FROM message_raw WHERE message_id = ?`)
 	softDeleteSQL := fmt.Sprintf(`UPDATE messages
 			SET deleted_at = %s, delete_batch_id = ?
@@ -425,7 +428,7 @@ func (s *Store) StreamMessageRaw(
 			args[i] = id
 		}
 
-		query := "SELECT message_id, raw_data, compression FROM message_raw WHERE message_id IN (" +
+		query := "SELECT message_id, raw_data, compression, content_hash FROM message_raw WHERE message_id IN (" +
 			strings.Join(placeholders, ",") + ")"
 		rows, err := s.db.Query(query, args...)
 		if err != nil {
@@ -435,14 +438,27 @@ func (s *Store) StreamMessageRaw(
 		for rows.Next() {
 			var msgID int64
 			var rawData []byte
-			var compression sql.NullString
-			if err := rows.Scan(&msgID, &rawData, &compression); err != nil {
+			var compression, contentHash sql.NullString
+			if err := rows.Scan(&msgID, &rawData, &compression, &contentHash); err != nil {
 				_ = rows.Close()
 				return err
 			}
 			comp := ""
 			if compression.Valid {
 				comp = compression.String
+			}
+			// Externalized rows resolve their bytes through the blob
+			// opener: consumers hash and parse content (normalized MIME
+			// dedup, RFC822 backfill), so the empty sentinel would
+			// silently corrupt their results.
+			if contentHash.Valid && contentHash.String != "" {
+				external, err := s.openExternalContent(
+					context.Background(), contentHash.String, "message raw content")
+				if err != nil {
+					_ = rows.Close()
+					return err
+				}
+				rawData, comp = external, "none"
 			}
 			fn(msgID, rawData, comp)
 		}
