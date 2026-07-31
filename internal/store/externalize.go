@@ -155,6 +155,89 @@ func (s *Store) BodyHTMLExternalHash(ctx context.Context, messageID int64) (hash
 	return h.String, true, nil
 }
 
+// ListInlineRawBatch returns up to limit message IDs whose raw content is
+// still inline, in stable ID order. Externalizing a row removes it from
+// the predicate, so repeated batches walk the remainder without an offset.
+func (s *Store) ListInlineRawBatch(ctx context.Context, limit int) ([]int64, error) {
+	return s.listIDs(ctx, `
+		SELECT message_id FROM message_raw
+		WHERE content_hash IS NULL
+		ORDER BY message_id LIMIT ?`, limit)
+}
+
+// ListInlineHTMLBatch returns up to limit message IDs whose rendered HTML
+// is still inline and non-empty.
+func (s *Store) ListInlineHTMLBatch(ctx context.Context, limit int) ([]int64, error) {
+	return s.listIDs(ctx, `
+		SELECT message_id FROM message_bodies
+		WHERE html_content_hash IS NULL AND body_html IS NOT NULL AND body_html != ''
+		ORDER BY message_id LIMIT ?`, limit)
+}
+
+func (s *Store) listIDs(ctx context.Context, query string, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list inline externalizable rows: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan inline externalizable row: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate inline externalizable rows: %w", err)
+	}
+	return ids, nil
+}
+
+// GetBodyHTMLInline returns the inline rendered HTML for messageID ("" when
+// absent or already externalized).
+func (s *Store) GetBodyHTMLInline(ctx context.Context, messageID int64) (string, error) {
+	var html sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT body_html FROM message_bodies WHERE message_id = ?`, messageID).Scan(&html)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get inline body html %d: %w", messageID, err)
+	}
+	return html.String, nil
+}
+
+// archiveExternalizedKey marks an archive whose inline content has been
+// fully externalized; new syncs then write CAS-native.
+const archiveExternalizedKey = "externalized_content"
+
+// SetArchiveExternalized records the completion marker.
+func (s *Store) SetArchiveExternalized(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO archive_metadata (key, value) VALUES (?, 'v1')
+		ON CONFLICT (key) DO NOTHING`, archiveExternalizedKey)
+	if err != nil {
+		return fmt.Errorf("set archive externalized marker: %w", err)
+	}
+	return nil
+}
+
+// ArchiveExternalized reports whether the completion marker is set.
+func (s *Store) ArchiveExternalized(ctx context.Context) (bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT value FROM archive_metadata WHERE key = ?`, archiveExternalizedKey).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read archive externalized marker: %w", err)
+	}
+	return value != "", nil
+}
+
 // CountInlineExternalizable reports how many message_raw and message_bodies
 // rows still hold inline content the externalize command could move.
 func (s *Store) CountInlineExternalizable(ctx context.Context) (rawRows, htmlRows int64, err error) {
