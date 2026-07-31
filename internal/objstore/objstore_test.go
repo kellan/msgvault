@@ -27,51 +27,62 @@ func runStoreContract(t *testing.T, store Store) {
 	ctx := context.Background()
 
 	t.Run("read all", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		data, err := store.ReadAll(ctx, "config.toml")
-		require.NoError(t, err)
-		assert.Equal(t, contractObjects["config.toml"], string(data))
+		require.NoError(err)
+		assert.Equal(contractObjects["config.toml"], string(data))
 	})
 
 	t.Run("size", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		size, err := store.Size(ctx, "packs/01/01ab.mvpack")
-		require.NoError(t, err)
-		assert.Equal(t, int64(20), size)
+		require.NoError(err)
+		assert.Equal(int64(20), size)
 	})
 
 	t.Run("read range middle", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		rc, err := store.ReadRange(ctx, "packs/01/01ab.mvpack", 4, 6)
-		require.NoError(t, err)
+		require.NoError(err)
 		got, err := io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, "456789", string(got))
+		require.NoError(err)
+		require.NoError(rc.Close())
+		assert.Equal("456789", string(got))
 	})
 
 	t.Run("list prefix", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		keys, err := store.List(ctx, "indexes/")
-		require.NoError(t, err)
+		require.NoError(err)
 		sort.Strings(keys)
-		assert.Equal(t, []string{"indexes/aa.mvidx", "indexes/bb.mvidx"}, keys)
+		assert.Equal([]string{"indexes/aa.mvidx", "indexes/bb.mvidx"}, keys)
 	})
 
 	t.Run("list empty prefix area", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		keys, err := store.List(ctx, "snapshots/")
-		require.NoError(t, err)
-		assert.Empty(t, keys)
+		require.NoError(err)
+		assert.Empty(keys)
 	})
 
 	t.Run("missing key maps to ErrNotExist", func(t *testing.T) {
+		assert := assert.New(t)
 		_, err := store.ReadAll(ctx, "indexes/nope.mvidx")
-		assert.ErrorIs(t, err, ErrNotExist)
+		assert.ErrorIs(err, ErrNotExist)
 		_, err = store.Size(ctx, "indexes/nope.mvidx")
-		assert.ErrorIs(t, err, ErrNotExist)
+		assert.ErrorIs(err, ErrNotExist)
 		rc, err := store.ReadRange(ctx, "indexes/nope.mvidx", 0, 4)
 		if err == nil {
 			// Backends may defer the miss to the first read.
 			_, err = io.ReadAll(rc)
 			_ = rc.Close()
 		}
-		assert.ErrorIs(t, err, ErrNotExist)
+		assert.ErrorIs(err, ErrNotExist)
 	})
 }
 
@@ -91,10 +102,11 @@ func TestFileStoreContract(t *testing.T) {
 }
 
 func TestFileStoreRejectsEscapingKeys(t *testing.T) {
+	assert := assert.New(t)
 	store := newContractFileStore(t)
 	for _, key := range []string{"../secrets", "a/../../b", ""} {
 		_, err := store.ReadAll(context.Background(), key)
-		assert.Error(t, err, "key %q must be rejected", key)
+		assert.Error(err, "key %q must be rejected", key)
 	}
 }
 

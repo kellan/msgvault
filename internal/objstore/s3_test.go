@@ -145,58 +145,68 @@ func TestS3StoreContract(t *testing.T) {
 }
 
 func TestS3ListPaginates(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	store, fake := newFakeS3Store(t)
 	// Force pagination across everything (5 objects, pages of 2).
 	fake.pageMax = 2
 	keys, err := store.List(context.Background(), "")
-	require.NoError(t, err)
+	require.NoError(err)
 	sort.Strings(keys)
 	want := make([]string, 0, len(contractObjects))
 	for k := range contractObjects {
 		want = append(want, k)
 	}
 	sort.Strings(want)
-	assert.Equal(t, want, keys)
+	assert.Equal(want, keys)
 }
 
 func TestS3RejectsBadCredentials(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	store, fake := newFakeS3Store(t)
 	// Corrupt the client's secret after the fake captured the good signer:
 	// the server must now refuse, and the client must surface the failure.
 	bad := *store
 	bad.creds.secretKey = "wrong"
 	_, err := bad.ReadAll(context.Background(), "config.toml")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "403")
+	require.Error(err)
+	assert.Contains(err.Error(), "403")
 	_ = fake
 }
 
 func TestNewS3StoreRequiresCredentials(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	_, err := NewS3Store(S3Config{Bucket: "b"}, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AWS_ACCESS_KEY_ID")
+	require.Error(err)
+	assert.Contains(err.Error(), "AWS_ACCESS_KEY_ID")
 }
 
 func TestParseS3URL(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	bucket, prefix, err := ParseS3URL("s3://my-bucket/some/prefix/")
-	require.NoError(t, err)
-	assert.Equal(t, "my-bucket", bucket)
-	assert.Equal(t, "some/prefix", prefix)
+	require.NoError(err)
+	assert.Equal("my-bucket", bucket)
+	assert.Equal("some/prefix", prefix)
 
 	bucket, prefix, err = ParseS3URL("s3://only-bucket")
-	require.NoError(t, err)
-	assert.Equal(t, "only-bucket", bucket)
-	assert.Empty(t, prefix)
+	require.NoError(err)
+	assert.Equal("only-bucket", bucket)
+	assert.Empty(prefix)
 
 	for _, bad := range []string{"s3://", "http://bucket/x", "not-a-url"} {
 		_, _, err := ParseS3URL(bad)
-		assert.Error(t, err, bad)
+		assert.Error(err, bad)
 	}
 }
 
 func TestS3SessionTokenIsSigned(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	t.Setenv("AWS_ACCESS_KEY_ID", fakeAccessKey)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", fakeSecretKey)
 	t.Setenv("AWS_SESSION_TOKEN", "session-token-value")
@@ -210,9 +220,9 @@ func TestS3SessionTokenIsSigned(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	store, err := NewS3Store(S3Config{Bucket: "b", Endpoint: server.URL}, server.Client())
-	require.NoError(t, err)
+	require.NoError(err)
 	_, err = store.ReadAll(context.Background(), "k")
-	require.NoError(t, err)
-	assert.True(t, sawToken, "session token header sent")
-	assert.True(t, sawSigned, "session token header included in SignedHeaders")
+	require.NoError(err)
+	assert.True(sawToken, "session token header sent")
+	assert.True(sawSigned, "session token header included in SignedHeaders")
 }

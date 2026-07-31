@@ -56,9 +56,28 @@ repo = "~/Backups/msgvault"
 	assert.Equal(filepath.Join(home, "Backups", "msgvault"), cfg.Offload.Repo)
 }
 
+func TestOffloadConfigAcceptsS3URLs(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.toml")
+	require.NoError(os.WriteFile(path, []byte(`
+[offload]
+repo = "s3://vault-bucket/msgvault/repo"
+s3_endpoint = "https://s3.us-west-000.backblazeb2.com"
+s3_region = "us-west-000"
+`), 0o600))
+
+	cfg, err := Load(path, "")
+	require.NoError(err)
+	assert.Equal("s3://vault-bucket/msgvault/repo", cfg.Offload.Repo,
+		"s3 URLs bypass path expansion and relative resolution")
+	assert.Equal("https://s3.us-west-000.backblazeb2.com", cfg.Offload.S3Endpoint)
+	assert.Equal("us-west-000", cfg.Offload.S3Region)
+}
+
 func TestOffloadConfigRejectsRemoteSchemes(t *testing.T) {
 	for _, repo := range []string{
-		"s3://bucket/prefix",
 		"https://host/repo",
 		"http://host/repo",
 	} {

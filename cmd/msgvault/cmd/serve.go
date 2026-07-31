@@ -226,12 +226,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// so an unmounted repository never blocks daemon startup.
 	var blobStore api.AttachmentBlobStore = attachmentMaint.blob
 	if cfg.Offload.Enabled() {
-		offloadRepo := cfg.Offload.Repo
+		offloadLoc := offloadLocation(cfg)
 		blobStore = attachmenttier.New(attachmentMaint.blob, s,
 			func() (attachmenttier.RemoteReader, error) {
-				return remoterepo.Open(offloadRepo)
+				return remoterepo.OpenLocation(context.Background(), offloadLoc)
 			})
-		logger.Info("remote blob tier enabled", "repo", offloadRepo)
+		logger.Info("remote blob tier enabled", "repo", offloadLoc.Repo)
 	}
 
 	// Vector misconfiguration still fails startup fast; the expensive

@@ -160,19 +160,21 @@ func TestOpenObjectStoreValidatesConfig(t *testing.T) {
 }
 
 func TestOpenLocationDispatch(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	root, _ := newFixtureRepo(t, []byte("dispatch blob"))
 
 	repo, err := remoterepo.OpenLocation(context.Background(), remoterepo.Location{Repo: root})
-	require.NoError(t, err)
+	require.NoError(err)
 	_, isPath := repo.(*remoterepo.Reader)
-	assert.True(t, isPath, "plain paths use the kit-backed reader")
-	require.NoError(t, repo.Close())
+	assert.True(isPath, "plain paths use the kit-backed reader")
+	require.NoError(repo.Close())
 
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	_, err = remoterepo.OpenLocation(context.Background(),
 		remoterepo.Location{Repo: "s3://bucket/prefix"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AWS_ACCESS_KEY_ID",
+	require.Error(err)
+	assert.Contains(err.Error(), "AWS_ACCESS_KEY_ID",
 		"missing credentials fail at open, not first read")
 }

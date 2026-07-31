@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.kenn.io/msgvault/internal/config"
 	msgexport "go.kenn.io/msgvault/internal/export"
 	"go.kenn.io/msgvault/internal/remoterepo"
 	"go.kenn.io/msgvault/internal/store"
@@ -40,8 +41,10 @@ backup repository and fully verified before any local byte is deleted; blobs
 the repository cannot prove it holds are skipped.
 
 Offloaded blobs are served transparently by the daemon from the repository
-([offload] repo in config.toml). The repository must be reachable as a
-filesystem path in this release.
+([offload] repo in config.toml): a filesystem path (external drive, NAS
+mount, rclone mount) or an s3://bucket/prefix URL for S3-compatible object
+storage (AWS, B2, R2, MinIO; credentials from the standard AWS_* environment
+variables).
 
 The daemon must be stopped first ('msgvault daemon stop'): offload rewrites
 attachment storage state that a running daemon caches and coordinates.`,
@@ -65,6 +68,16 @@ and durable before the offload record is removed, so an interruption can
 never leave a blob unreachable.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error { return runOffloadRestore(cmd) },
+}
+
+// offloadLocation maps the [offload] config section to a repository
+// location for remoterepo.OpenLocation.
+func offloadLocation(c *config.Config) remoterepo.Location {
+	return remoterepo.Location{
+		Repo:       c.Offload.Repo,
+		S3Endpoint: c.Offload.S3Endpoint,
+		S3Region:   c.Offload.S3Region,
+	}
 }
 
 // refuseOffloadWithLiveDaemon mirrors unpack-attachments: offload mutates
@@ -134,7 +147,7 @@ func runOffload(cmd *cobra.Command) (runErr error) {
 		return err
 	}
 	defer cleanup()
-	remote, err := remoterepo.Open(cfg.Offload.Repo)
+	remote, err := remoterepo.OpenLocation(cmd.Context(), offloadLocation(cfg))
 	if err != nil {
 		return err
 	}
@@ -177,7 +190,7 @@ type offloadResult struct {
 // against this repository sane: it has at least one snapshot, the newest
 // snapshot is not stale (a stale repo usually means the off-site sync is
 // broken), and any previously recorded offloads name this same repository.
-func checkOffloadRepository(ctx context.Context, st *store.Store, remote *remoterepo.Reader, opts offloadOptions) error {
+func checkOffloadRepository(ctx context.Context, st *store.Store, remote remoterepo.Repo, opts offloadOptions) error {
 	latest, err := remote.LatestSnapshot()
 	if err != nil {
 		return err
@@ -209,7 +222,7 @@ func checkOffloadRepository(ctx context.Context, st *store.Store, remote *remote
 	return nil
 }
 
-func offloadBlobs(ctx context.Context, out io.Writer, st *store.Store, remote *remoterepo.Reader,
+func offloadBlobs(ctx context.Context, out io.Writer, st *store.Store, remote remoterepo.Repo,
 	attachmentsDir string, opts offloadOptions) (offloadResult, error) {
 	result := offloadResult{DryRun: opts.DryRun}
 	if err := checkOffloadRepository(ctx, st, remote, opts); err != nil {
@@ -272,7 +285,7 @@ func offloadBlobs(ctx context.Context, out io.Writer, st *store.Store, remote *r
 
 // verifyRemoteBlob streams the blob through kit's full verification stack
 // (CRC, stored length, SHA-256 identity) and returns its raw size.
-func verifyRemoteBlob(ctx context.Context, remote *remoterepo.Reader, hash string) (int64, error) {
+func verifyRemoteBlob(ctx context.Context, remote remoterepo.Repo, hash string) (int64, error) {
 	rc, size, err := remote.OpenBlob(ctx, hash)
 	if err != nil {
 		return 0, err
@@ -398,7 +411,7 @@ func runOffloadRestore(cmd *cobra.Command) (runErr error) {
 		return err
 	}
 	defer cleanup()
-	remote, err := remoterepo.Open(cfg.Offload.Repo)
+	remote, err := remoterepo.OpenLocation(cmd.Context(), offloadLocation(cfg))
 	if err != nil {
 		return err
 	}
@@ -416,7 +429,7 @@ func runOffloadRestore(cmd *cobra.Command) (runErr error) {
 // restoreOffloadedBlob writes the blob back as a loose file, durably, and
 // only then deletes the offload record. The reverse order could strand a
 // blob with neither a local copy nor a catalog entry.
-func restoreOffloadedBlob(ctx context.Context, st *store.Store, remote *remoterepo.Reader,
+func restoreOffloadedBlob(ctx context.Context, st *store.Store, remote remoterepo.Repo,
 	attachmentsDir, hash string) error {
 	offloaded, err := st.IsBlobOffloaded(ctx, hash)
 	if err != nil {

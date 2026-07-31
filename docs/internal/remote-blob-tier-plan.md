@@ -219,12 +219,22 @@ Environment note: `TestPatchSettingsClassifiesFilesystemFailureAsServerError`
 fails in this container with or without these changes (root ignores the
 read-only-directory fixture); unrelated to this work.
 
+## Delivered after the first slice (2026-07-31, same branch)
+
+- Kit widening landed on the `github.com/kellan/kit` fork
+  (`pack.NewReaderFromReaderAt`); msgvault consumes it via a go.mod
+  `replace` until it is upstreamed.
+- `internal/objstore` (Store interface, filesystem backend, SigV4 S3
+  backend with signature-verifying fake-server tests).
+- `internal/remoterepo.ObjectReader` + `OpenLocation` dispatch;
+  `[offload] repo` now accepts `s3://bucket/prefix` with `s3_endpoint` /
+  `s3_region`.
+
 ## Deferred coordinated follow-up
 
-- **Kit widening** (`pack.Reader` over `io.ReaderAt` +
-  `NewReaderFromReaderAt`): upstream module change; unblocks `https://` and
-  `s3://` backends via `internal/objstore` per the design doc.
-- `internal/objstore` + SigV4 S3 backend + bounded local fetch cache.
+- Upstream the kit widening to `kenn-io/kit` and drop the go.mod replace.
+- `https://` static-host backend (needs a listing story; S3 covers the
+  cloud case) + bounded local fetch cache for network repositories.
 - `remote_content` availability state end-to-end (OpenAPI, web UI) and
   `store.Stats` local/offloaded byte accounting.
 - Daemon-proxied `offload` (mutation lease instead of daemon-stopped).
