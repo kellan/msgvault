@@ -624,7 +624,9 @@ type UnpackedBlob struct {
 
 // ListUnpackedBlobs returns every distinct local (non-URL) content and
 // thumbnail blob that has no attachment_pack_index row, preserving all of its
-// DB-recorded relative candidate paths. Content blobs come first, then blobs
+// DB-recorded relative candidate paths. Offloaded blobs (blob_offload rows)
+// are excluded: their bytes were deliberately evicted to the remote tier, so
+// they are neither packing candidates nor missing. Content blobs come first, then blobs
 // seen only as thumbnails (Size -1); a hash appearing as both is listed once
 // with content and thumbnail paths combined.
 func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
@@ -693,6 +695,8 @@ func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
 		  AND LOWER(storage_path) NOT LIKE 'https://%'
 		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
 		                  WHERE p.blob_hash = LOWER(attachments.content_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(attachments.content_hash))
 		GROUP BY content_hash, storage_path
 		ORDER BY MIN(id), storage_path`, true); err != nil {
 		return nil, err
@@ -706,6 +710,8 @@ func (s *Store) ListUnpackedBlobs() ([]UnpackedBlob, error) {
 		  AND LOWER(thumbnail_path) NOT LIKE 'https://%'
 		  AND NOT EXISTS (SELECT 1 FROM attachment_pack_index p
 		                  WHERE p.blob_hash = LOWER(attachments.thumbnail_hash))
+		  AND NOT EXISTS (SELECT 1 FROM blob_offload bo
+		                  WHERE bo.content_hash = LOWER(attachments.thumbnail_hash))
 		GROUP BY thumbnail_hash, thumbnail_path
 		ORDER BY MIN(id), thumbnail_path`, false); err != nil {
 		return nil, err

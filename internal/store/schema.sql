@@ -630,3 +630,15 @@ CREATE TABLE IF NOT EXISTS attachment_packs (
     stored_bytes BIGINT NOT NULL,
     created_at   TEXT NOT NULL
 );
+
+-- Remote blob tier catalog (docs/internal/remote-blob-tier-design.md).
+-- A row exists iff the blob's local bytes were deliberately evicted after a
+-- verified read from the named backup repository. content_hash is canonical
+-- lowercase SHA-256; offloaded_at is RFC3339 UTC; stored_len records the
+-- raw bytes freed locally for reporting.
+CREATE TABLE IF NOT EXISTS blob_offload (
+    content_hash TEXT PRIMARY KEY,
+    repo_id      TEXT NOT NULL,
+    offloaded_at TEXT NOT NULL,
+    stored_len   BIGINT NOT NULL
+);
