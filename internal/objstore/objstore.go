@@ -8,7 +8,9 @@ package objstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"sync"
 )
 
 // ErrNotExist reports a key with no object behind it. Backends translate
@@ -34,7 +36,8 @@ type Store interface {
 }
 
 // ReaderAt adapts one object to io.ReaderAt for pack.NewReaderFromReaderAt.
-// Every ReadAt becomes one ranged read. It intentionally implements no
+// Every ReadAt becomes one ranged read, except inside an optional
+// prefetched span (see SpanPrefetch). It intentionally implements no
 // Close: the pack reader must not take ownership of anything here.
 type ReaderAt struct {
 	Ctx   context.Context
@@ -44,9 +47,59 @@ type ReaderAt struct {
 	// end returns the available bytes and io.EOF, per the io.ReaderAt
 	// contract.
 	ObjectSize int64
+	// Span optionally names one contiguous region fetched as a single
+	// ranged read and served from memory afterward.
+	Span SpanPrefetch
+
+	mu   sync.Mutex
+	span []byte
 }
 
+// SpanPrefetch makes one contiguous byte span of the object serve from a
+// single ranged read: the first ReadAt inside [Off, Off+Len) fetches the
+// whole span, and later reads inside it are memory hits. Reads outside the
+// span pass through. This exists for pack blob streaming, which otherwise
+// chunks a known-length stored span into many small ranged reads — each a
+// full network round trip on a latency-bound backend.
+type SpanPrefetch struct {
+	Off int64
+	Len int64
+}
+
+// MaxSpanPrefetchBytes bounds the prefetch buffer; spans larger than this
+// fall back to chunked reads rather than buffering unbounded blob content.
+const MaxSpanPrefetchBytes = 8 << 20
+
 func (r *ReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if r.Span.Len > 0 && r.Span.Len <= MaxSpanPrefetchBytes &&
+		off >= r.Span.Off && off+int64(len(p)) <= r.Span.Off+r.Span.Len {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if err := r.ensureSpanLocked(); err != nil {
+			return 0, err
+		}
+		return copy(p, r.span[off-r.Span.Off:]), nil
+	}
+	return r.readAtDirect(p, off)
+}
+
+func (r *ReaderAt) ensureSpanLocked() error {
+	if r.span != nil {
+		return nil
+	}
+	buf := make([]byte, r.Span.Len)
+	n, err := r.readAtDirect(buf, r.Span.Off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if int64(n) != r.Span.Len {
+		return fmt.Errorf("objstore: span prefetch read %d of %d bytes", n, r.Span.Len)
+	}
+	r.span = buf
+	return nil
+}
+
+func (r *ReaderAt) readAtDirect(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, errors.New("objstore: negative offset")
 	}

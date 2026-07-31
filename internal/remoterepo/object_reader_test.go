@@ -132,6 +132,50 @@ func TestObjectReaderLatestSnapshot(t *testing.T) {
 	require.Error(err, "tampered manifest must fail the ID recompute")
 }
 
+// countingStore counts per-operation calls to pin the round-trip budget.
+type countingStore struct {
+	objstore.Store
+	ops int
+}
+
+func (c *countingStore) ReadRange(ctx context.Context, key string, off, length int64) (io.ReadCloser, error) {
+	c.ops++
+	return c.Store.ReadRange(ctx, key, off, length)
+}
+
+func (c *countingStore) Size(ctx context.Context, key string) (int64, error) {
+	c.ops++
+	return c.Store.Size(ctx, key)
+}
+
+// TestObjectReaderReadCoalescing pins the per-blob round-trip budget: one
+// blob read costs at most six store operations (size, header, trailer,
+// footer, and the prefetched stored span) — chunked streaming must never
+// reintroduce one round trip per 32KiB.
+func TestObjectReaderReadCoalescing(t *testing.T) {
+	require := require.New(t)
+	content := make([]byte, 512<<10) // large enough for many stream chunks
+	for i := range content {
+		content[i] = byte(i * 31)
+	}
+	root, entries := newFixtureRepo(t, content)
+
+	counting := &countingStore{Store: objstore.NewFileStore(root)}
+	r, err := remoterepo.OpenObjectStore(context.Background(), counting)
+	require.NoError(err)
+	defer r.Close()              //nolint:errcheck
+	require.NoError(r.Refresh()) // index load outside the measured window
+
+	counting.ops = 0
+	rc, _, err := r.OpenBlob(context.Background(), entries[0].ID.String())
+	require.NoError(err)
+	_, err = io.Copy(io.Discard, rc)
+	require.NoError(err)
+	require.NoError(rc.Close())
+	require.LessOrEqual(counting.ops, 6,
+		"per-blob ranged-read budget exceeded: latency-bound backends pay one round trip per operation")
+}
+
 func TestOpenObjectStoreValidatesConfig(t *testing.T) {
 	require := require.New(t)
 	root, _ := newFixtureRepo(t, []byte("blob"))

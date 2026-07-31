@@ -521,12 +521,21 @@ func (s *Server) openFileContent(ctx context.Context, file store.FileMetadata) (
 	return content, length, err
 }
 
+// blobOffloadCatalog is the optional store capability the availability
+// classifier uses to recognize offloaded blobs from the catalog instead of
+// probing them: a per-row open against the remote tier would turn file
+// listings into one network round trip per row.
+type blobOffloadCatalog interface {
+	IsBlobOffloaded(ctx context.Context, hash string) (bool, error)
+}
+
 // fileContentState classifies one authoritative attachment row. Packed
 // attachments legitimately carry only a content hash, so availability of a
 // row without a recorded storage path is determined through the blob
 // resolver — the packed CAS store first, then the loose content-addressed
 // fallback. Rows with a recorded storage path are reported as local without
-// probing, matching the legacy loose-file contract.
+// probing, matching the legacy loose-file contract; offloaded rows are
+// reported available from the catalog alone, since the tier serves them.
 func (s *Server) fileContentState(ctx context.Context, file store.FileMetadata) (FileContentState, bool) {
 	if file.URL != "" {
 		return FileContentURLOnly, false
@@ -534,8 +543,15 @@ func (s *Server) fileContentState(ctx context.Context, file store.FileMetadata) 
 	if file.ContentHash == "" {
 		return FileContentMetadataOnly, false
 	}
-	if file.StoragePath == "" && !s.fileContentResolvable(ctx, file) {
-		return FileContentMissingBlob, false
+	if file.StoragePath == "" {
+		if catalog, ok := s.store.(blobOffloadCatalog); ok {
+			if offloaded, err := catalog.IsBlobOffloaded(ctx, file.ContentHash); err == nil && offloaded {
+				return FileContentLocal, true
+			}
+		}
+		if !s.fileContentResolvable(ctx, file) {
+			return FileContentMissingBlob, false
+		}
 	}
 	return FileContentLocal, true
 }

@@ -869,6 +869,13 @@ type storeAPIAdapter struct {
 
 var _ api.MessageStore = (*storeAPIAdapter)(nil)
 var _ api.CtxMessageStore = (*storeAPIAdapter)(nil)
+
+// IsBlobOffloaded exposes the offload catalog so the API's availability
+// classifier can recognize tier-served blobs without probing them.
+func (a *storeAPIAdapter) IsBlobOffloaded(ctx context.Context, hash string) (bool, error) {
+	return a.store.IsBlobOffloaded(ctx, hash)
+}
+
 var _ api.MeetingImporter = (*storeAPIAdapter)(nil)
 var _ api.SourceStatusStore = (*storeAPIAdapter)(nil)
 var _ api.CLIStore = (*storeAPIAdapter)(nil)

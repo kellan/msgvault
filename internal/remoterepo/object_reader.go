@@ -195,7 +195,14 @@ func (r *ObjectReader) openIndexed(ctx context.Context, index map[pack.BlobID]ba
 		return nil, 0, err
 	}
 	reader, err := pack.NewReaderFromReaderAt(
-		&objstore.ReaderAt{Ctx: ctx, Store: r.store, Key: packKey, ObjectSize: size},
+		&objstore.ReaderAt{
+			Ctx: ctx, Store: r.store, Key: packKey, ObjectSize: size,
+			// The index already names the blob's stored span, so blob
+			// streaming costs one ranged read instead of one per chunk.
+			Span: objstore.SpanPrefetch{
+				Off: int64(indexed.Offset), Len: int64(indexed.StoredLen), //nolint:gosec // format-v1 bounds
+			},
+		},
 		size, indexed.PackID, nil, pack.ReaderOptions{})
 	if err != nil {
 		return nil, 0, fmt.Errorf("open pack %s: %w", indexed.PackID, err)

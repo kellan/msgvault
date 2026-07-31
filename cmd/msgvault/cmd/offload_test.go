@@ -23,14 +23,14 @@ import (
 // offloadTestArchive is a real temp archive: SQLite store, loose attachment
 // files, and a real backup repository holding a chosen subset of the blobs.
 type offloadTestArchive struct {
-	t              *testing.T
+	t              testing.TB
 	st             *store.Store
 	attachmentsDir string
 	repoRoot       string
 	seq            int
 }
 
-func newOffloadTestArchive(t *testing.T) *offloadTestArchive {
+func newOffloadTestArchive(t testing.TB) *offloadTestArchive {
 	t.Helper()
 	dataDir := t.TempDir()
 	st, err := store.OpenForTest(filepath.Join(dataDir, "msgvault.db"))

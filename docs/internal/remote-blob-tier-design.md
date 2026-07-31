@@ -633,6 +633,84 @@ Two notes:
   captured automatically by `backup create`; it is not an offload target
   and needs no change.
 
+### Painful paths, e2e coverage, and measured overheads (2026-07-31)
+
+Inventory of every path whose behavior changes when content is not
+local, what guards it, and what it costs. Benchmarks:
+`cmd/msgvault/cmd/offload_bench_test.go` (`BenchmarkTierRead`,
+`BenchmarkOffloadVerification`), run with
+`go test -tags "fts5 sqlite_vec" -run '^$' -bench BenchmarkTierRead ./cmd/msgvault/cmd/`.
+Numbers below are one 256 KiB attachment read through the production
+tier on this container; absolute values vary by machine, the ratios are
+the finding. Latency flavors inject a fixed per-operation delay,
+approximating same-region (~5 ms) and cross-region (~25 ms) object
+storage.
+
+| Serving flavor | per read | vs local |
+|---|---|---|
+| local loose file (baseline) | ~0.9 ms | 1× |
+| repository, filesystem path | ~1.6 ms | ~1.8× |
+| repository, object reader, no latency | ~1.4 ms | ~1.6× |
+| repository, object reader, 5 ms/op | ~24 ms | ~27× |
+| repository, object reader, 25 ms/op | ~107 ms | ~119× |
+
+The per-blob round-trip budget is 5 operations (size, header, trailer,
+footer, stored span) and is pinned by
+`TestObjectReaderReadCoalescing` (≤ 6): the first benchmark run
+exposed ~14 round trips per blob because pack streaming chunked the
+stored span into ~32 KiB ranged reads; the fix prefetches the span the
+index already names as one ranged read (`objstore.SpanPrefetch`,
+bounded at 8 MiB), a 3.1× improvement at 5 ms. Pack-reader/footer
+caching could reduce the budget to ~2 round trips for repeat packs and
+is deliberately deferred until a real workload shows repeat-pack
+locality.
+
+Path-by-path:
+
+- **Single attachment open (web/TUI detail, export of one file).** One
+  tier read; ~25–110 ms on object storage. Imperceptible for "open one
+  old attachment"; covered by the e2e serving test.
+- **Files-workspace listings.** The availability classifier used to
+  open/close a stream per row; against a remote tier that is one round
+  trip per listed file — the single worst interaction found. Fixed:
+  offloaded rows classify from the `blob_offload` catalog (a PK
+  lookup), pinned by `TestFileContentStateOffloadedSkipsProbe`.
+  Listings now cost zero remote operations regardless of offload state.
+- **Bulk export (`export-attachments` zip).** N tier reads, so N × the
+  table above; at 5 ms/op, ~40 blobs/s ≈ 10 MB/s for 256 KiB blobs.
+  Acceptable for occasional exports; pack-reader caching is the lever
+  if it ever matters.
+- **`offload` verification.** Reads every candidate once, by design
+  (`BenchmarkOffloadVerification`: ~163 MB/s against a local-path
+  repository — disk-bound; against S3, budget wall-clock ≈ bytes ÷
+  bandwidth + 5 ops × latency per blob).
+- **Backup capture.** Never reads offloaded blobs (capture skips
+  content already in the repository by hash); the tier fallback exists
+  for cross-repository edge cases only and logs when taken.
+- **Nightly maintenance.** Offloaded blobs are excluded from pack
+  candidates and never probed; no remote I/O from maintenance, ever.
+
+Raw-MIME externalization (the follow-up design) inherits this profile
+with two watch items, to be benchmarked when it lands: the Slack and
+meeting importers call `GetMessageRaw` in per-message loops during
+repair sweeps — those touch *recent* messages, which date-based
+eviction naturally keeps local, but the equivalence must be asserted,
+not assumed; and dedup's bulk raw comparison becomes hash-equality for
+externalized rows (cheaper than today), with byte reads only for
+mixed legacy/externalized pairs.
+
+Test-data stance: synthetic archives are sufficient for correctness
+and relative performance — `internal/fakevault` already generates
+deterministic schema-valid archives (messages, bodies, raw MIME, a
+content-addressed attachment tree with realistic size/compressibility
+mix), and blob content is opaque to every tier code path; only counts
+and size distributions matter. A real archive adds value in exactly
+three places, all runnable by the operator locally without sharing
+data: `externalize-raw` migration wall-clock on the true 25.6 GB
+database, the `repair-encoding` render-equivalence check in the
+deferred drop-and-derive stream, and MIME-parser variety across
+20 years of real senders.
+
 ### Amended delivery order
 
 1. **Kit**: widen `pack.Reader` to `io.ReaderAt` + `NewReaderFromReaderAt`.
