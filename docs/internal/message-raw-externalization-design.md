@@ -262,7 +262,10 @@ That would eliminate the duplication, but it changes the safety story
 from byte-preservation to proven recomputation and deserves its own
 design when revisited. Externalization loses nothing toward it: a
 future drop phase would simply garbage-collect HTML blobs whose
-derivation check passes.
+derivation check passes. Measured 2026-07-31 on the target archive:
+zero `body_html` rows lack a `message_raw` row, so a future
+drop-and-derive stream would have full coverage — no orphan set to
+carve out.
 
 Standing constraint from the store survey either way: the phase touches
 only the `body_html` column, never the row or `body_text` — the
