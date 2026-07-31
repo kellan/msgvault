@@ -7,13 +7,16 @@ remote blob tier (`remote-blob-tier-design.md`). This is step 2 of that
 design's amended delivery order and the change that attacks the dominant
 share of archive size.
 
-Written 2026-07-31. Status: measurements complete; implementation plan in
-`message-raw-externalization-plan.md`. Implementation note amending the
-schema sketch below: SQLite cannot drop NOT NULL without a full table
-rebuild — a needless risk on a 9 GiB table — so externalized rows keep
-`raw_data` as a zero-length blob and `content_hash IS NOT NULL` is the
-sole row-state discriminator; VACUUM after migration reclaims the space
-either way.
+Written 2026-07-31. Status: implemented (see
+`message-raw-externalization-plan.md`, all tasks complete):
+`msgvault externalize`, mixed-mode reads through the blob-opener seam,
+reference/capture arms, hash-aware dedup/subset, CAS-native writes on
+migrated archives, and `offload --only attachments|raw|html`.
+Implementation note amending the schema sketch below: SQLite cannot drop
+NOT NULL without a full table rebuild — a needless risk on a 9 GiB table
+— so externalized rows keep `raw_data` as a zero-length blob and
+`content_hash IS NOT NULL` is the sole row-state discriminator; VACUUM
+after migration reclaims the space either way.
 
 ## Motivation
 

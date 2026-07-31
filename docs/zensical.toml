@@ -39,6 +39,7 @@ nav = [
     {"Accounts & Collections" = "usage/multi-account.md"},
     {"Deduplication" = "usage/deduplication.md"},
     {"Backup" = "usage/backup.md"},
+    {"Offload & Externalize" = "usage/offload.md"},
   ]},
   {"Guides" = [
     {"OAuth Setup" = "guides/oauth-setup.md"},

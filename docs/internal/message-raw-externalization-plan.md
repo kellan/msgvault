@@ -101,96 +101,96 @@ go.kenn.io/kit packstore.
 
 ## Task 1: schema columns and store row-state plumbing
 
-- [ ] Failing tests: `message_raw` round trip in all three states (inline,
+- [x] Failing tests: `message_raw` round trip in all three states (inline,
       externalized via empty-blob + hash, transient both-set reads as
       externalized); `message_bodies.html_content_hash` round trip;
       migration marker applied once.
-- [ ] Add `content_hash TEXT` to `message_raw` and `html_content_hash TEXT`
+- [x] Add `content_hash TEXT` to `message_raw` and `html_content_hash TEXT`
       to `message_bodies` in both schemas; one-time ALTER migrations via
       `applied_migrations` for existing archives (both dialects).
-- [ ] `go test ./internal/store/ -run 'Externaliz|MessageRaw' -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add externalization hash columns to message_raw and message_bodies`
+- [x] `go test ./internal/store/ -run 'Externaliz|MessageRaw' -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add externalization hash columns to message_raw and message_bodies`
 
 ## Task 2: RawBlobOpener seam and mixed-mode reads
 
-- [ ] Failing tests: `GetMessageRaw` inline unchanged; externalized row
+- [x] Failing tests: `GetMessageRaw` inline unchanged; externalized row
       streams via injected opener and returns identical bytes; nil opener +
       externalized row = loud error; `GetMessageContext` resolves
       `html_content_hash` through the opener; `batchPopulateBodies` never
       calls the opener (call-count fake).
-- [ ] `Store.SetRawBlobOpener(func(ctx, hash) (io.ReadCloser, int64, error))`;
+- [x] `Store.SetRawBlobOpener(func(ctx, hash) (io.ReadCloser, int64, error))`;
       wire in serve.go (tier-backed) and in direct-CLI open paths
       (attachmentstore-backed); thread through the query engines' raw/HTML
       accessors.
-- [ ] Commit: `Resolve externalized raw and HTML content through the blob opener`
+- [x] Commit: `Resolve externalized raw and HTML content through the blob opener`
 
 ## Task 3: reference authority and backup capture arms
 
-- [ ] Failing tests: hashes from both new columns appear in
+- [x] Failing tests: hashes from both new columns appear in
       `ListReferencedBlobHashes` and resolve as members in
       `ResolveAttachmentBlob`; excluded from `ListUnpackedBlobs` when
       offloaded; `backupapp` ContentInfo counts include them (extend
       `internal/store/backup_test.go` fixtures).
-- [ ] UNION arms for `message_raw.content_hash` and
+- [x] UNION arms for `message_raw.content_hash` and
       `message_bodies.html_content_hash` in the resolve/membership,
       reference-inventory, and pack-candidate SQL (content blobs written by
       the externalize command land loose in the CAS, so candidates need
       recorded paths — write them CAS-canonical `hash[:2]/hash`); extend
       `frozenView.ContentInfo`.
-- [ ] Commit: `Treat externalized raw and HTML blobs as first-class content references`
+- [x] Commit: `Treat externalized raw and HTML blobs as first-class content references`
 
 ## Task 4: `msgvault externalize` migration command
 
-- [ ] Failing e2e (fakevault archive — `internal/fakevault` generates rows
+- [x] Failing e2e (fakevault archive — `internal/fakevault` generates rows
       with real zlib raw_data): batch externalizes N rows; interrupt (limit)
       + re-run resumes idempotently; verify-readback failure leaves the row
       inline; `export-eml` output byte-identical before/after; summary
       prints the VACUUM/compact follow-up and repository re-baseline note;
       `--dry-run` counts only; daemon-stopped guard (mirror offload).
-- [ ] Implement: select `WHERE content_hash IS NULL` batches; inflate,
+- [x] Implement: select `WHERE content_hash IS NULL` batches; inflate,
       SHA-256, write blob through the packstore mutation path
       (coordinator lease, as `attachment_maintenance.go:239`), verify
       readback, then one transaction setting `content_hash` and emptying
       `raw_data` (same shape for `body_html`/`html_content_hash`).
       Progress = remaining NULL-hash count. Archive marker in
       `archive_metadata` flips new writes (Task 6) to CAS-native.
-- [ ] Commit: `Add msgvault externalize for raw MIME and body HTML`
+- [x] Commit: `Add msgvault externalize for raw MIME and body HTML`
 
 ## Task 5: byte-moving call-site conversions
 
-- [ ] Failing tests per site, covering all three row-state pairings:
+- [x] Failing tests per site, covering all three row-state pairings:
       dedup copy (`dedup.go:292`) copies hashes for externalized rows;
       dedup compare (`dedup.go:428`) short-circuits on hash equality and
       fetches bytes only for mixed pairs; subset (`subset.go:457`) carries
       slim rows plus referenced CAS blobs through its existing blob-copy
       pass; legacy migration (`migrations.go:107`) skips
       `content_hash IS NOT NULL` rows.
-- [ ] Commit: `Convert raw-data movers to hash-aware paths`
+- [x] Commit: `Convert raw-data movers to hash-aware paths`
 
 ## Task 6: CAS-native writes for new syncs
 
-- [ ] Failing tests: with the archive marker set, `UpsertMessageRaw*`
+- [x] Failing tests: with the archive marker set, `UpsertMessageRaw*`
       writes blob + slim row (blob durable before row); without it,
       inline as today; Gmail/Slack/Teams importer paths compile against
       the unchanged signatures.
-- [ ] Commit: `Write raw content CAS-native on migrated archives`
+- [x] Commit: `Write raw content CAS-native on migrated archives`
 
 ## Task 7: offload class selection and end-to-end tier proof
 
-- [ ] Failing e2e (extend `offload_test.go` fixture with raw/HTML blobs):
+- [x] Failing e2e (extend `offload_test.go` fixture with raw/HTML blobs):
       `offload --only raw` / `--only html` / `--only attachments` select
       the right classes (raw selection joins `message_raw.message_id`
       directly); offloaded raw served back through
       `show-message --raw`-equivalent engine call via the tier; restore
       works; add a raw-blob flavor to `BenchmarkTierRead`.
-- [ ] Commit: `Extend offload to raw and HTML blob classes`
+- [x] Commit: `Extend offload to raw and HTML blob classes`
 
 ## Task 8: docs
 
-- [ ] `docs/usage/offload.md` (new: full lifecycle — externalize, backup,
+- [x] `docs/usage/offload.md` (new: full lifecycle — externalize, backup,
       offload, restore, compact), `docs/configuration.md` touch-ups,
       design-doc status updates, plan checkboxes.
-- [ ] Commit: `Document externalization and offload lifecycle`
+- [x] Commit: `Document externalization and offload lifecycle`
 
 ## Verification gates (run on the operator's real archive, not in CI)
 
@@ -201,6 +201,37 @@ go.kenn.io/kit packstore.
   jumps by ~404k + HTML rows; nightly delta shrinks.
 - VACUUM, then `msgvault stats` shows the database near
   metadata+text+FTS size.
+
+## Execution notes (2026-07-31)
+
+All eight tasks landed on the branch, one focused commit each. Deviations
+and discoveries worth knowing:
+
+- **Schema probes must never run mid-transaction.** The first
+  implementation probed for the externalization columns lazily inside
+  maintenance transactions and deadlocked single-connection stores; the
+  probe now runs once at store open (all four constructors) and
+  `InitSchema` sets the flag after migrating. Same discipline for the
+  CAS-native marker probe.
+- **Schema-adaptive reference SQL was a hard requirement, not polish.**
+  Restore targets are byte-exact unmigrated databases and `OpenReadOnly`
+  never migrates, so every reference/membership/stats query carries a
+  base variant for pre-externalization schemas
+  (`attachmentReferencedHashesBaseSQL` et al.), and
+  `backupapp`/`pack_restore` probe the frozen/restored schema directly.
+- **Expression indexes live in Go, not schema.sql** (schema executes
+  before column migrations on legacy databases):
+  `idx_message_raw_content_hash_lower`,
+  `idx_message_bodies_html_hash_lower`, created in `InitSchema` and
+  asserted by the pack-liveness EXPLAIN test.
+- Dedup's normalized-MIME hashing cannot use `content_hash` (it hashes
+  *normalized* content), so `StreamMessageRaw` resolves externalized
+  rows through the opener instead of short-circuiting on hash equality.
+- Dry-run reports from `CountInlineExternalizable` rather than batch
+  iteration (nothing leaves the predicate on a dry run).
+- The `BenchmarkTierRead` raw-blob flavor was not added: offloaded raw
+  content rides the identical `OpenStream` path the attachment flavors
+  already measure.
 
 ## Deferred coordinated follow-up
 
