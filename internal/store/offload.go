@@ -107,11 +107,40 @@ func (s *Store) OffloadRepoIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// OffloadClasses selects which blob classes offload may evict. The zero
+// value means all classes.
+type OffloadClasses struct {
+	Attachments bool
+	Raw         bool
+	HTML        bool
+}
+
+// All reports whether every class is selected (including the zero value).
+func (c OffloadClasses) All() bool {
+	return (c.Attachments && c.Raw && c.HTML) || (!c.Attachments && !c.Raw && !c.HTML)
+}
+
+func (c OffloadClasses) names() []string {
+	var names []string
+	if c.Attachments {
+		names = append(names, "attachments")
+	}
+	if c.Raw {
+		names = append(names, "raw")
+	}
+	if c.HTML {
+		names = append(names, "html")
+	}
+	return names
+}
+
 // OffloadSelection describes which blobs `msgvault offload` may evict.
 // Conditions AND together and every predicate is evaluated per referencing
-// message: a blob qualifies only when ALL messages that reference it (via
-// content or thumbnail hash) match, so a blob shared with a hot message
-// stays local. At least one condition must be set.
+// message: a blob qualifies only when ALL messages that reference it —
+// across every class (attachment, thumbnail, raw MIME, rendered HTML) —
+// match, so a blob shared with a hot message stays local. Classes narrow
+// which blobs are candidates, never which references count. At least one
+// condition must be set.
 type OffloadSelection struct {
 	// Before selects messages whose canonical date (sent_at, falling back
 	// to internal_date) is known and earlier than this bound. Zero means
@@ -122,6 +151,9 @@ type OffloadSelection struct {
 	RequireSourceDeleted bool
 	// RequireArchiveDeleted selects flag-deleted messages (deleted_at set).
 	RequireArchiveDeleted bool
+	// Classes restricts candidates to blobs referenced by the selected
+	// classes. Zero value = all classes.
+	Classes OffloadClasses
 }
 
 // Empty reports whether no condition is set.
@@ -158,22 +190,46 @@ func (s *Store) ListOffloadCandidates(ctx context.Context, sel OffloadSelection)
 	}
 	pred := strings.Join(conds, " AND ")
 
+	// The refs CTE spans every blob class so the ALL-references rule holds
+	// across classes: a hash serving as both an old attachment and a recent
+	// message's raw content stays local regardless of class selection.
 	query := `
 		WITH refs AS (
-			SELECT LOWER(content_hash) AS h, message_id, COALESCE(size, -1) AS sz
+			SELECT LOWER(content_hash) AS h, message_id, COALESCE(size, -1) AS sz,
+			       'attachments' AS cls
 			FROM attachments
 			WHERE content_hash IS NOT NULL AND content_hash != ''
 			UNION ALL
-			SELECT LOWER(thumbnail_hash) AS h, message_id, -1 AS sz
+			SELECT LOWER(thumbnail_hash) AS h, message_id, -1 AS sz, 'attachments' AS cls
 			FROM attachments
 			WHERE thumbnail_hash IS NOT NULL AND thumbnail_hash != ''
+			UNION ALL
+			SELECT LOWER(content_hash) AS h, message_id, -1 AS sz, 'raw' AS cls
+			FROM message_raw
+			WHERE content_hash IS NOT NULL AND content_hash != ''
+			UNION ALL
+			SELECT LOWER(html_content_hash) AS h, message_id, -1 AS sz, 'html' AS cls
+			FROM message_bodies
+			WHERE html_content_hash IS NOT NULL AND html_content_hash != ''
 		)
 		SELECT r.h, MAX(r.sz)
 		FROM refs r
 		JOIN messages m ON m.id = r.message_id
 		WHERE NOT EXISTS (SELECT 1 FROM blob_offload bo WHERE bo.content_hash = r.h)
 		GROUP BY r.h
-		HAVING COUNT(*) = COUNT(CASE WHEN ` + pred + ` THEN 1 END)
+		HAVING COUNT(*) = COUNT(CASE WHEN ` + pred + ` THEN 1 END)`
+
+	if !sel.Classes.All() {
+		classes := sel.Classes.names()
+		placeholders := make([]string, len(classes))
+		for i, class := range classes {
+			placeholders[i] = "?"
+			args = append(args, class)
+		}
+		query += `
+		AND SUM(CASE WHEN r.cls IN (` + strings.Join(placeholders, ",") + `) THEN 1 ELSE 0 END) > 0`
+	}
+	query += `
 		ORDER BY r.h`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

@@ -23,6 +23,7 @@ var (
 	offloadBefore         string
 	offloadSourceDeleted  bool
 	offloadArchiveDeleted bool
+	offloadOnly           []string
 	offloadDryRun         bool
 	offloadMaxBytes       int64
 	offloadForceStale     bool
@@ -102,6 +103,18 @@ func offloadSelectionFromFlags() (store.OffloadSelection, error) {
 	}
 	sel.RequireSourceDeleted = offloadSourceDeleted
 	sel.RequireArchiveDeleted = offloadArchiveDeleted
+	for _, class := range offloadOnly {
+		switch class {
+		case "attachments":
+			sel.Classes.Attachments = true
+		case "raw":
+			sel.Classes.Raw = true
+		case "html":
+			sel.Classes.HTML = true
+		default:
+			return sel, fmt.Errorf("offload: unknown --only class %q (want attachments, raw, html)", class)
+		}
+	}
 	if sel.Empty() {
 		return sel, errors.New(
 			"offload: give at least one selection condition (--before, --deleted-from-source, --archive-deleted)")
@@ -477,6 +490,8 @@ func init() {
 		"only blobs whose every referencing message was deleted from its source")
 	offloadCmd.Flags().BoolVar(&offloadArchiveDeleted, "archive-deleted", false,
 		"only blobs whose every referencing message is flag-deleted in the archive")
+	offloadCmd.Flags().StringSliceVar(&offloadOnly, "only", nil,
+		"blob classes to offload: attachments, raw, html (default all)")
 	offloadCmd.Flags().BoolVar(&offloadDryRun, "dry-run", false,
 		"verify and report, but change nothing")
 	offloadCmd.Flags().Int64Var(&offloadMaxBytes, "max-bytes", 0,

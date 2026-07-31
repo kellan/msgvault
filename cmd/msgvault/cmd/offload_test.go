@@ -238,6 +238,92 @@ func TestOffloadEndToEnd(t *testing.T) {
 	})
 }
 
+func TestOffloadExternalizedClasses(t *testing.T) {
+	must := require.New(t)
+	ctx := context.Background()
+	a := newOffloadTestArchive(t)
+	old := time.Date(2011, 4, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// One old message carrying an attachment, externalized raw MIME, and
+	// externalized HTML — three blob classes on one message.
+	attContent := []byte("old attachment bytes")
+	rawContent := []byte("old raw mime bytes")
+	htmlContent := []byte("<p>old rendered html</p>")
+	hashAtt := a.addBlob(attContent, old)
+	var msgID int64
+	must.NoError(a.st.DB().QueryRow(a.st.Rebind(
+		`SELECT message_id FROM attachments WHERE LOWER(content_hash) = ?`), hashAtt).Scan(&msgID))
+	must.NoError(a.st.UpsertMessageRaw(msgID, rawContent))
+	_, err := a.st.DB().Exec(a.st.Rebind(`
+		INSERT INTO message_bodies (message_id, body_text, body_html)
+		VALUES (?, 'text', ?)`), msgID, string(htmlContent))
+	must.NoError(err)
+
+	// Externalize raw + HTML into the archive CAS, then place all three
+	// blobs in the repository.
+	var out bytes.Buffer
+	extResult, err := externalizeArchive(ctx, &out, a.st, a.attachmentsDir,
+		externalizeOptions{Raw: true, HTML: true})
+	must.NoError(err)
+	must.Equal(int64(1), extResult.RawRows)
+	must.Equal(int64(1), extResult.HTMLRows)
+	hashRaw, _, err := a.st.MessageRawExternalHash(ctx, msgID)
+	must.NoError(err)
+	hashHTML, _, err := a.st.BodyHTMLExternalHash(ctx, msgID)
+	must.NoError(err)
+	a.storeInRepo(attContent, rawContent, htmlContent)
+	a.writeSnapshot(time.Now())
+	remote := a.openRemote()
+
+	t.Run("only raw evicts just the raw blob", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		sel := store.OffloadSelection{Before: cutoff}
+		sel.Classes.Raw = true
+		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, defaultOffloadOptions(sel))
+		require.NoError(err)
+		assert.Equal(1, result.Offloaded)
+		offloaded, err := a.st.IsBlobOffloaded(ctx, hashRaw)
+		require.NoError(err)
+		assert.True(offloaded)
+		assert.NoFileExists(a.loosePath(hashRaw))
+		assert.FileExists(a.loosePath(hashAtt), "attachment class untouched")
+		assert.FileExists(a.loosePath(hashHTML), "html class untouched")
+	})
+
+	t.Run("all classes evict the rest", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir,
+			defaultOffloadOptions(store.OffloadSelection{Before: cutoff}))
+		require.NoError(err)
+		assert.Equal(2, result.Offloaded, "attachment and html blobs follow")
+		assert.NoFileExists(a.loosePath(hashAtt))
+		assert.NoFileExists(a.loosePath(hashHTML))
+	})
+
+	t.Run("offloaded raw and html serve through the tier", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		local, err := attachmentstore.New(store.NewPackCatalog(a.st), a.attachmentsDir)
+		require.NoError(err)
+		t.Cleanup(func() { _ = local.Close() })
+		tier := attachmenttier.New(local, a.st, func() (attachmenttier.RemoteReader, error) {
+			return remote, nil
+		})
+		a.st.SetRawBlobOpener(tier.OpenStream)
+
+		raw, err := a.st.GetMessageRaw(msgID)
+		require.NoError(err)
+		assert.Equal(rawContent, raw, "offloaded raw MIME served from the repository")
+
+		m, err := a.st.GetMessageContext(ctx, msgID)
+		require.NoError(err)
+		assert.Equal(string(htmlContent), m.BodyHTML, "offloaded HTML served from the repository")
+	})
+}
+
 func TestOffloadRefusesUnsafeRepositories(t *testing.T) {
 	ctx := context.Background()
 	cutoff := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
