@@ -58,47 +58,52 @@ func newFixtureRepo(t *testing.T, blobs ...[]byte) (string, []pack.Entry) {
 }
 
 func TestHasAndRepoID(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	content := []byte("attachment bytes for the tier")
 	root, entries := newFixtureRepo(t, content)
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
-	assert.NotEmpty(t, r.RepoID())
+	assert.NotEmpty(r.RepoID())
 
 	has, err := r.Has(entries[0].ID.String())
-	require.NoError(t, err)
-	assert.True(t, has)
+	require.NoError(err)
+	assert.True(has)
 
 	has, err = r.Has("deadbeef" + entries[0].ID.String()[8:])
-	require.NoError(t, err)
-	assert.False(t, has)
+	require.NoError(err)
+	assert.False(has)
 
 	_, err = r.Has("not-a-hash")
-	require.Error(t, err)
+	require.Error(err)
 }
 
 func TestOpenBlobRoundTrip(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	content := []byte("verified round trip through a real pack")
 	root, entries := newFixtureRepo(t, content)
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
 	rc, size, err := r.OpenBlob(context.Background(), entries[0].ID.String())
-	require.NoError(t, err)
-	assert.Equal(t, int64(len(content)), size)
+	require.NoError(err)
+	assert.Equal(int64(len(content)), size)
 
 	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	assert.Equal(t, content, got)
+	require.NoError(err)
+	assert.Equal(content, got)
 	// Fully consumed: terminal verification ran, Close must be clean.
-	require.NoError(t, rc.Close())
+	require.NoError(rc.Close())
 }
 
 func TestOpenBlobEarlyCloseReportsIncompleteVerification(t *testing.T) {
+	require := require.New(t)
 	// Use content large enough that opening cannot have buffered it all.
 	content := make([]byte, 1<<20)
 	for i := range content {
@@ -107,15 +112,17 @@ func TestOpenBlobEarlyCloseReportsIncompleteVerification(t *testing.T) {
 	root, entries := newFixtureRepo(t, content)
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
 	rc, _, err := r.OpenBlob(context.Background(), entries[0].ID.String())
-	require.NoError(t, err)
-	require.Error(t, rc.Close(), "closing before EOF must not report success")
+	require.NoError(err)
+	require.Error(rc.Close(), "closing before EOF must not report success")
 }
 
 func TestOpenBlobFailsClosedOnCorruption(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	content := make([]byte, 64<<10)
 	for i := range content {
 		content[i] = 0xAB
@@ -124,22 +131,22 @@ func TestOpenBlobFailsClosedOnCorruption(t *testing.T) {
 
 	// Flip one byte in the middle of the pack's data region.
 	var packPath string
-	require.NoError(t, filepath.Walk(filepath.Join(root, "packs"),
+	require.NoError(filepath.Walk(filepath.Join(root, "packs"),
 		func(path string, info os.FileInfo, err error) error {
 			if err == nil && !info.IsDir() {
 				packPath = path
 			}
 			return err
 		}))
-	require.NotEmpty(t, packPath)
+	require.NotEmpty(packPath)
 	f, err := os.OpenFile(packPath, os.O_RDWR, 0)
-	require.NoError(t, err)
+	require.NoError(err)
 	_, err = f.WriteAt([]byte{0xCD}, int64(entries[0].Offset)+100)
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
+	require.NoError(err)
+	require.NoError(f.Close())
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
 	rc, _, err := r.OpenBlob(context.Background(), entries[0].ID.String())
@@ -148,56 +155,61 @@ func TestOpenBlobFailsClosedOnCorruption(t *testing.T) {
 	}
 	_, readErr := io.ReadAll(rc)
 	closeErr := rc.Close()
-	assert.Error(t, errors.Join(readErr, closeErr),
+	assert.Error(errors.Join(readErr, closeErr),
 		"corrupted content must fail read or close, never verify")
 }
 
 func TestOpenBlobReloadsIndexOnMiss(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	first := []byte("blob present at open time")
 	root, _ := newFixtureRepo(t, first)
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
 	// Force the initial index load.
 	_, err = r.Has(pack.ComputeBlobID(first).String())
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// A second pack + index published after open (a newer backup run).
 	second := []byte("blob published after the reader opened")
 	entries := addFixturePack(t, root, second)
 
 	rc, _, err := r.OpenBlob(context.Background(), entries[0].ID.String())
-	require.NoError(t, err, "reader must reload the index once on miss")
+	require.NoError(err, "reader must reload the index once on miss")
 	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	assert.Equal(t, second, got)
-	require.NoError(t, rc.Close())
+	require.NoError(err)
+	assert.Equal(second, got)
+	require.NoError(rc.Close())
 }
 
 func TestOpenBlobUnknownHash(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	root, _ := newFixtureRepo(t, []byte("only blob"))
 
 	r, err := remoterepo.Open(root)
-	require.NoError(t, err)
+	require.NoError(err)
 	defer r.Close() //nolint:errcheck
 
 	missing := pack.ComputeBlobID([]byte("never stored")).String()
 	_, _, err = r.OpenBlob(context.Background(), missing)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, remoterepo.ErrBlobNotFound)
+	require.Error(err)
+	assert.ErrorIs(err, remoterepo.ErrBlobNotFound)
 }
 
 func TestOpenRefusesEncryptedRepository(t *testing.T) {
+	require := require.New(t)
 	root, _ := newFixtureRepo(t, []byte("blob"))
 	cfgPath := filepath.Join(root, "config.toml")
 	cfg, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	require.Contains(t, string(cfg), `encryption = "none"`)
+	require.NoError(err)
+	require.Contains(string(cfg), `encryption = "none"`)
 	tampered := strings.Replace(string(cfg), `encryption = "none"`, `encryption = "age"`, 1)
-	require.NoError(t, os.WriteFile(cfgPath, []byte(tampered), 0o600))
+	require.NoError(os.WriteFile(cfgPath, []byte(tampered), 0o600))
 
 	_, err = remoterepo.Open(root)
-	require.Error(t, err)
+	require.Error(err)
 }

@@ -146,85 +146,95 @@ func TestOffloadEndToEnd(t *testing.T) {
 	sel := store.OffloadSelection{Before: cutoff}
 
 	t.Run("dry run changes nothing", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		var out bytes.Buffer
 		opts := defaultOffloadOptions(sel)
 		opts.DryRun = true
 		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, opts)
-		require.NoError(t, err)
-		assert.Equal(t, 1, result.Offloaded)
-		assert.Equal(t, int64(len(cold)), result.OffloadedBytes)
-		assert.Equal(t, 1, result.SkippedMissing, "unbacked blob is skipped, not evicted")
-		assert.FileExists(t, a.loosePath(hashCold))
+		require.NoError(err)
+		assert.Equal(1, result.Offloaded)
+		assert.Equal(int64(len(cold)), result.OffloadedBytes)
+		assert.Equal(1, result.SkippedMissing, "unbacked blob is skipped, not evicted")
+		assert.FileExists(a.loosePath(hashCold))
 		offloaded, err := a.st.IsBlobOffloaded(ctx, hashCold)
-		require.NoError(t, err)
-		assert.False(t, offloaded)
+		require.NoError(err)
+		assert.False(offloaded)
 	})
 
 	t.Run("offload evicts only verified cold blobs", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		var out bytes.Buffer
 		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, defaultOffloadOptions(sel))
-		require.NoError(t, err)
-		assert.Equal(t, 1, result.Offloaded)
-		assert.Equal(t, 1, result.SkippedMissing)
-		assert.Equal(t, 0, result.Failed)
+		require.NoError(err)
+		assert.Equal(1, result.Offloaded)
+		assert.Equal(1, result.SkippedMissing)
+		assert.Equal(0, result.Failed)
 
-		assert.NoFileExists(t, a.loosePath(hashCold), "cold blob evicted")
-		assert.FileExists(t, a.loosePath(hashHot), "hot blob untouched")
-		assert.FileExists(t, a.loosePath(hashUnbacked), "unbacked blob untouched")
+		assert.NoFileExists(a.loosePath(hashCold), "cold blob evicted")
+		assert.FileExists(a.loosePath(hashHot), "hot blob untouched")
+		assert.FileExists(a.loosePath(hashUnbacked), "unbacked blob untouched")
 
 		offloaded, err := a.st.IsBlobOffloaded(ctx, hashCold)
-		require.NoError(t, err)
-		assert.True(t, offloaded)
+		require.NoError(err)
+		assert.True(offloaded)
 
 		count, bytesFreed, err := a.st.OffloadedBlobStats(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), count)
-		assert.Equal(t, int64(len(cold)), bytesFreed)
+		require.NoError(err)
+		assert.Equal(int64(1), count)
+		assert.Equal(int64(len(cold)), bytesFreed)
 	})
 
 	t.Run("second run finds nothing new", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		var out bytes.Buffer
 		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, defaultOffloadOptions(sel))
-		require.NoError(t, err)
-		assert.Equal(t, 0, result.Offloaded)
-		assert.Equal(t, 1, result.SkippedMissing)
+		require.NoError(err)
+		assert.Equal(0, result.Offloaded)
+		assert.Equal(1, result.SkippedMissing)
 	})
 
 	t.Run("offloaded blob served through the production tier", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		local, err := attachmentstore.New(store.NewPackCatalog(a.st), a.attachmentsDir)
-		require.NoError(t, err)
+		require.NoError(err)
 		t.Cleanup(func() { _ = local.Close() })
 		tier := attachmenttier.New(local, a.st, func() (attachmenttier.RemoteReader, error) {
 			return remote, nil
 		})
 
 		rc, size, err := tier.OpenStream(ctx, hashCold)
-		require.NoError(t, err, "offloaded blob must be served from the repository")
+		require.NoError(err, "offloaded blob must be served from the repository")
 		got, err := io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, cold, got)
-		assert.Equal(t, int64(len(cold)), size)
+		require.NoError(err)
+		require.NoError(rc.Close())
+		assert.Equal(cold, got)
+		assert.Equal(int64(len(cold)), size)
 
 		rc, _, err = tier.OpenStream(ctx, hashHot)
-		require.NoError(t, err, "hot blob still served locally")
+		require.NoError(err, "hot blob still served locally")
 		got, err = io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-		assert.Equal(t, hot, got)
+		require.NoError(err)
+		require.NoError(rc.Close())
+		assert.Equal(hot, got)
 	})
 
 	t.Run("restore re-materializes and clears the record", func(t *testing.T) {
-		require.NoError(t, restoreOffloadedBlob(ctx, a.st, remote, a.attachmentsDir, hashCold))
+		require := require.New(t)
+		assert := assert.New(t)
+		require.NoError(restoreOffloadedBlob(ctx, a.st, remote, a.attachmentsDir, hashCold))
 		got, err := os.ReadFile(a.loosePath(hashCold))
-		require.NoError(t, err)
-		assert.Equal(t, cold, got)
+		require.NoError(err)
+		assert.Equal(cold, got)
 		offloaded, err := a.st.IsBlobOffloaded(ctx, hashCold)
-		require.NoError(t, err)
-		assert.False(t, offloaded)
+		require.NoError(err)
+		assert.False(offloaded)
 
 		err = restoreOffloadedBlob(ctx, a.st, remote, a.attachmentsDir, hashHot)
-		require.Error(t, err, "restoring a blob that was never offloaded is refused")
+		require.Error(err, "restoring a blob that was never offloaded is refused")
 	})
 }
 
@@ -234,17 +244,21 @@ func TestOffloadRefusesUnsafeRepositories(t *testing.T) {
 	sel := store.OffloadSelection{Before: cutoff}
 
 	t.Run("no snapshots", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		a := newOffloadTestArchive(t)
 		content := []byte("blob")
 		a.addBlob(content, cutoff.AddDate(-1, 0, 0))
 		a.storeInRepo(content)
 		var out bytes.Buffer
 		_, err := offloadBlobs(ctx, &out, a.st, a.openRemote(), a.attachmentsDir, defaultOffloadOptions(sel))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no snapshots")
+		require.Error(err)
+		assert.Contains(err.Error(), "no snapshots")
 	})
 
 	t.Run("stale snapshot refused unless forced", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		a := newOffloadTestArchive(t)
 		content := []byte("stale repo blob")
 		a.addBlob(content, cutoff.AddDate(-1, 0, 0))
@@ -254,34 +268,38 @@ func TestOffloadRefusesUnsafeRepositories(t *testing.T) {
 
 		var out bytes.Buffer
 		_, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, defaultOffloadOptions(sel))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "force-stale")
+		require.Error(err)
+		assert.Contains(err.Error(), "force-stale")
 
 		opts := defaultOffloadOptions(sel)
 		opts.ForceStale = true
 		result, err := offloadBlobs(ctx, &out, a.st, remote, a.attachmentsDir, opts)
-		require.NoError(t, err)
-		assert.Equal(t, 1, result.Offloaded)
+		require.NoError(err)
+		assert.Equal(1, result.Offloaded)
 	})
 
 	t.Run("different repository refused", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 		a := newOffloadTestArchive(t)
 		content := []byte("repo identity blob")
 		a.addBlob(content, cutoff.AddDate(-1, 0, 0))
 		a.storeInRepo(content)
 		a.writeSnapshot(time.Now())
-		require.NoError(t, a.st.RecordBlobOffload(ctx, store.BlobOffloadRecord{
+		require.NoError(a.st.RecordBlobOffload(ctx, store.BlobOffloadRecord{
 			ContentHash: pack.ComputeBlobID([]byte("elsewhere")).String(),
 			RepoID:      "some-other-repo", OffloadedAt: time.Now().UTC(), StoredLen: 1,
 		}))
 		var out bytes.Buffer
 		_, err := offloadBlobs(ctx, &out, a.st, a.openRemote(), a.attachmentsDir, defaultOffloadOptions(sel))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "refusing to split")
+		require.Error(err)
+		assert.Contains(err.Error(), "refusing to split")
 	})
 }
 
 func TestOffloadSelectionFromFlags(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	savedBefore, savedSrc, savedArch := offloadBefore, offloadSourceDeleted, offloadArchiveDeleted
 	defer func() {
 		offloadBefore, offloadSourceDeleted, offloadArchiveDeleted = savedBefore, savedSrc, savedArch
@@ -289,20 +307,20 @@ func TestOffloadSelectionFromFlags(t *testing.T) {
 
 	offloadBefore, offloadSourceDeleted, offloadArchiveDeleted = "", false, false
 	_, err := offloadSelectionFromFlags()
-	require.Error(t, err, "empty selection is refused")
+	require.Error(err, "empty selection is refused")
 
 	offloadBefore = "2020-01-01"
 	sel, err := offloadSelectionFromFlags()
-	require.NoError(t, err)
-	assert.Equal(t, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), sel.Before)
+	require.NoError(err)
+	assert.Equal(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), sel.Before)
 
 	offloadBefore = "not-a-date"
 	_, err = offloadSelectionFromFlags()
-	require.Error(t, err)
+	require.Error(err)
 
 	offloadBefore, offloadSourceDeleted = "", true
 	sel, err = offloadSelectionFromFlags()
-	require.NoError(t, err)
-	assert.True(t, sel.RequireSourceDeleted)
-	assert.True(t, sel.Before.IsZero())
+	require.NoError(err)
+	assert.True(sel.RequireSourceDeleted)
+	assert.True(sel.Before.IsZero())
 }

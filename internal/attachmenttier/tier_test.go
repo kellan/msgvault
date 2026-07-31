@@ -65,80 +65,92 @@ func newTier(local *fakeLocal, catalog *fakeCatalog, remote *fakeRemote, dialErr
 }
 
 func TestLocalHitPassesThrough(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	local := &fakeLocal{content: map[string]string{"aa": "local bytes"}}
 	tier, dials := newTier(local, &fakeCatalog{}, &fakeRemote{}, nil)
 
 	rc, size, err := tier.OpenStream(context.Background(), "aa")
-	require.NoError(t, err)
+	require.NoError(err)
 	got, _ := io.ReadAll(rc)
-	assert.Equal(t, "local bytes", string(got))
-	assert.Equal(t, int64(11), size)
-	assert.Equal(t, 0, *dials, "remote must not be dialed on a local hit")
+	assert.Equal("local bytes", string(got))
+	assert.Equal(int64(11), size)
+	assert.Equal(0, *dials, "remote must not be dialed on a local hit")
 }
 
 func TestLocalMissNotOffloadedPreservesNotExist(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	tier, dials := newTier(&fakeLocal{}, &fakeCatalog{}, &fakeRemote{}, nil)
 
 	_, _, err := tier.OpenStream(context.Background(), "bb")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, fs.ErrNotExist,
+	require.Error(err)
+	assert.ErrorIs(err, fs.ErrNotExist,
 		"genuinely missing blobs keep the established miss sentinel")
-	assert.NotErrorIs(t, err, attachmenttier.ErrRemoteUnavailable)
-	assert.Equal(t, 0, *dials)
+	assert.NotErrorIs(err, attachmenttier.ErrRemoteUnavailable)
+	assert.Equal(0, *dials)
 }
 
 func TestLocalErrorOtherThanNotExistPassesThrough(t *testing.T) {
+	assert := assert.New(t)
 	boom := errors.New("disk on fire")
 	tier, dials := newTier(&fakeLocal{err: boom}, &fakeCatalog{}, &fakeRemote{}, nil)
 
 	_, _, err := tier.OpenStream(context.Background(), "cc")
-	assert.ErrorIs(t, err, boom)
-	assert.Equal(t, 0, *dials)
+	assert.ErrorIs(err, boom)
+	assert.Equal(0, *dials)
 }
 
 func TestOffloadedServedFromRemote(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	catalog := &fakeCatalog{offloaded: map[string]bool{"dd": true}}
 	remote := &fakeRemote{content: map[string]string{"dd": "remote bytes"}}
 	tier, dials := newTier(&fakeLocal{}, catalog, remote, nil)
 
 	rc, size, err := tier.OpenStream(context.Background(), "dd")
-	require.NoError(t, err)
+	require.NoError(err)
 	got, _ := io.ReadAll(rc)
-	assert.Equal(t, "remote bytes", string(got))
-	assert.Equal(t, int64(12), size)
+	assert.Equal("remote bytes", string(got))
+	assert.Equal(int64(12), size)
 
 	// Second read reuses the dialed reader.
 	rc2, _, err := tier.OpenStream(context.Background(), "dd")
-	require.NoError(t, err)
-	require.NoError(t, rc2.Close())
-	assert.Equal(t, 1, *dials, "remote reader is dialed once and reused")
-	assert.Equal(t, 2, remote.opens)
+	require.NoError(err)
+	require.NoError(rc2.Close())
+	assert.Equal(1, *dials, "remote reader is dialed once and reused")
+	assert.Equal(2, remote.opens)
 }
 
 func TestRemoteDialFailureIsUnavailableNotMissing(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	catalog := &fakeCatalog{offloaded: map[string]bool{"ee": true}}
 	tier, _ := newTier(&fakeLocal{}, catalog, nil,
 		&fs.PathError{Op: "open", Path: "/mnt/repo", Err: fs.ErrNotExist})
 
 	_, _, err := tier.OpenStream(context.Background(), "ee")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, attachmenttier.ErrRemoteUnavailable)
-	assert.NotErrorIs(t, err, fs.ErrNotExist,
+	require.Error(err)
+	assert.ErrorIs(err, attachmenttier.ErrRemoteUnavailable)
+	assert.NotErrorIs(err, fs.ErrNotExist,
 		"an unmounted repository must never read as a deleted attachment")
 }
 
 func TestRemoteOpenFailureIsUnavailableNotMissing(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	catalog := &fakeCatalog{offloaded: map[string]bool{"ff": true}}
 	remote := &fakeRemote{} // blob absent remotely: integrity alarm, still 'unavailable'
 	tier, _ := newTier(&fakeLocal{}, catalog, remote, nil)
 
 	_, _, err := tier.OpenStream(context.Background(), "ff")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, attachmenttier.ErrRemoteUnavailable)
-	assert.NotErrorIs(t, err, fs.ErrNotExist)
+	require.Error(err)
+	assert.ErrorIs(err, attachmenttier.ErrRemoteUnavailable)
+	assert.NotErrorIs(err, fs.ErrNotExist)
 }
 
 func TestDialRetriedAfterFailure(t *testing.T) {
+	require := require.New(t)
 	catalog := &fakeCatalog{offloaded: map[string]bool{"aa": true}}
 	remote := &fakeRemote{content: map[string]string{"aa": "x"}}
 	fail := true
@@ -150,20 +162,21 @@ func TestDialRetriedAfterFailure(t *testing.T) {
 	})
 
 	_, _, err := tier.OpenStream(context.Background(), "aa")
-	require.ErrorIs(t, err, attachmenttier.ErrRemoteUnavailable)
+	require.ErrorIs(err, attachmenttier.ErrRemoteUnavailable)
 
 	fail = false
 	rc, _, err := tier.OpenStream(context.Background(), "aa")
-	require.NoError(t, err, "a failed dial must not be cached forever")
-	require.NoError(t, rc.Close())
+	require.NoError(err, "a failed dial must not be cached forever")
+	require.NoError(rc.Close())
 }
 
 func TestCatalogErrorSurfacesAsItself(t *testing.T) {
+	assert := assert.New(t)
 	boom := errors.New("database locked")
 	tier, _ := newTier(&fakeLocal{}, &fakeCatalog{err: boom}, &fakeRemote{}, nil)
 
 	_, _, err := tier.OpenStream(context.Background(), "gg")
-	assert.ErrorIs(t, err, boom)
-	assert.NotErrorIs(t, err, fs.ErrNotExist,
+	assert.ErrorIs(err, boom)
+	assert.NotErrorIs(err, fs.ErrNotExist,
 		"a catalog failure must not be mistaken for a missing blob")
 }
