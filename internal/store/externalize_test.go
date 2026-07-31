@@ -266,6 +266,58 @@ func TestExternalizedHashesAreFirstClassReferences(t *testing.T) {
 	assert.Zero(pruned, "externalized blob's index row is live, not prunable")
 }
 
+func TestStreamMessageRawResolvesExternalizedRows(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	raw := []byte("raw mime bytes for externalization")
+	hash := strings.Repeat("7a", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+	opener := &countingOpener{blobs: map[string][]byte{hash: raw}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	var got []byte
+	var gotComp string
+	require.NoError(fx.st.StreamMessageRaw([]int64{fx.msgID},
+		func(_ int64, rawData []byte, compression string) {
+			got = append([]byte(nil), rawData...)
+			gotComp = compression
+		}))
+	assert.Equal(raw, got, "bulk consumers must see the real bytes, not the sentinel")
+	assert.Equal("none", gotComp)
+	assert.Equal(1, opener.opens)
+}
+
+func TestMergeDuplicatesBackfillsExternalizedRaw(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("8b", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+
+	// A survivor with no raw row: merging the externalized duplicate must
+	// backfill the hash pointer, not the empty sentinel alone.
+	src, err := fx.st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := fx.st.EnsureConversation(src.ID, "ext-thread", "Ext Thread")
+	require.NoError(err)
+	survivorID, err := fx.st.UpsertMessage(&store.Message{
+		ConversationID: convID, SourceID: src.ID,
+		SourceMessageID: "ext-survivor", MessageType: "email",
+	})
+	require.NoError(err)
+
+	_, err = fx.st.MergeDuplicates(survivorID, []int64{fx.msgID}, "batch-ext-1")
+	require.NoError(err)
+
+	gotHash, hasRow, err := fx.st.MessageRawExternalHash(ctx, survivorID)
+	require.NoError(err)
+	assert.True(hasRow, "survivor gained a raw row")
+	assert.Equal(hash, gotHash, "survivor's raw content is the externalized hash pointer")
+}
+
 func TestExternalHashLookupsWithoutRows(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
