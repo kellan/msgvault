@@ -216,15 +216,31 @@ run to completion (a `settings` marker records the archive as
 CAS-native for raw content, keeping mixed-mode reads but single-mode
 writes).
 
-### Expected effect (to be confirmed by dbstat)
+### Measured effect (2026-07-31, target archive)
 
-If `message_raw` is ~N GB of the database: the database shrinks by ~N GB
-after migration + vacuum; the attachment CAS grows by roughly the same
-(pack zstd ≈ row zlib); `offload --before`/`--deleted-from-source` can
-then evict nearly all of it, leaving the local archive at metadata +
-bodies + FTS + hot blobs. If dbstat shows a different whale (embeddings,
-FTS), this design still stands but drops in priority — decide after the
-numbers land.
+Per-table byte sums on the 25.6 GB database (LENGTH-based, so excluding
+page overhead):
+
+- `message_bodies` (body_text + body_html, uncompressed): **~12.1 GiB**
+- `message_raw` (403,958 rows, zlib): **~9.3 GiB**
+- `messages_fts_data`: ~0.9 GiB
+
+Two consequences. First, this design proceeds as written: externalizing
+`message_raw` removes ~9.3 GiB from the database and makes it
+offloadable. Second, the single largest table is `message_bodies`, which
+was scoped out as "small" on the assumption raw MIME dominated — that
+assumption is now measured false, and bodies need their own decision.
+`body_text` is load-bearing locally (FTS triggers, snippets, embedding
+generation) and should stay. `body_html` is derived data — parsed from
+the raw MIME this design keeps byte-exact — and is read only by the
+single-message detail view via PK lookup. Pending the text/html split
+measurement, the leading option is a follow-up phase that drops or
+externalizes `body_html`, re-deriving it from the raw blob (local or
+tier-fetched) on demand at detail-view time, with the same batched
+migration shape as `externalize-raw`. That phase must respect the
+`message_bodies` FTS trigger coupling (`schema.sql:354-361`): triggers
+fire on body rows, so only the `body_html` column is in scope, never the
+row or `body_text`.
 
 ## Testing
 
