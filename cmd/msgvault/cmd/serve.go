@@ -233,6 +233,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 			})
 		logger.Info("remote blob tier enabled", "repo", offloadLoc.Repo)
 	}
+	// Externalized raw MIME and HTML bodies resolve through the same
+	// (possibly tiered) blob store as attachments.
+	s.SetRawBlobOpener(blobStore.OpenStream)
 
 	// Vector misconfiguration still fails startup fast; the expensive
 	// backend open/migrate/backfill runs in the background after the API

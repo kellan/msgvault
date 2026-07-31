@@ -1,8 +1,10 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -106,6 +108,95 @@ func TestMarkBodyHTMLExternalized(t *testing.T) {
 	err = fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID+999, hash)
 	require.Error(err)
 	assert.Contains(err.Error(), "no message_bodies row")
+}
+
+// countingOpener serves blobs from a map and counts opens.
+type countingOpener struct {
+	blobs map[string][]byte
+	opens int
+}
+
+func (c *countingOpener) open(_ context.Context, hash string) (io.ReadCloser, int64, error) {
+	c.opens++
+	content, ok := c.blobs[strings.ToLower(hash)]
+	if !ok {
+		return nil, 0, fmt.Errorf("blob %s not in fake CAS", hash)
+	}
+	return io.NopCloser(bytes.NewReader(content)), int64(len(content)), nil
+}
+
+func TestGetMessageRawExternalizedReadsThroughOpener(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	raw := []byte("raw mime bytes for externalization")
+	hash := strings.Repeat("2a", 32)
+
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, hash))
+
+	// No opener: loud, actionable failure — never silent empty content.
+	_, err := fx.st.GetMessageRaw(fx.msgID)
+	require.Error(err)
+	assert.Contains(err.Error(), "no blob opener")
+
+	opener := &countingOpener{blobs: map[string][]byte{hash: raw}}
+	fx.st.SetRawBlobOpener(opener.open)
+	got, err := fx.st.GetMessageRaw(fx.msgID)
+	require.NoError(err)
+	assert.Equal(raw, got, "externalized read returns the exact original bytes")
+	assert.Equal(1, opener.opens)
+
+	// Inline rows never touch the opener.
+	fx2 := newExternalizeFixture(t)
+	fx2.st.SetRawBlobOpener(opener.open)
+	got, err = fx2.st.GetMessageRaw(fx2.msgID)
+	require.NoError(err)
+	assert.Equal(raw, got)
+	assert.Equal(1, opener.opens, "inline read must not call the opener")
+}
+
+func TestGetMessageContextResolvesExternalizedHTML(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	html := "<p>rendered html</p>"
+	hash := strings.Repeat("3b", 32)
+
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, hash))
+	opener := &countingOpener{blobs: map[string][]byte{hash: []byte(html)}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	m, err := fx.st.GetMessageContext(ctx, fx.msgID)
+	require.NoError(err)
+	assert.Equal(html, m.BodyHTML, "detail view re-materializes externalized HTML")
+	assert.Equal("plain text", m.BodyText)
+	assert.Equal(1, opener.opens)
+}
+
+func TestConversationWindowNeverFetchesExternalizedHTML(t *testing.T) {
+	// The batch body path feeds conversation rendering; a per-message blob
+	// fetch there would turn one conversation view into N tier round
+	// trips. Batch views are text-only by design.
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	hash := strings.Repeat("4c", 32)
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, hash))
+
+	opener := &countingOpener{blobs: map[string][]byte{hash: []byte("<p>x</p>")}}
+	fx.st.SetRawBlobOpener(opener.open)
+
+	var convID int64
+	require.NoError(fx.st.DB().QueryRow(fx.st.Rebind(
+		`SELECT conversation_id FROM messages WHERE id = ?`), fx.msgID).Scan(&convID))
+	window, err := fx.st.GetConversationWindowContext(ctx, convID, fx.msgID, 10, 10, nil, nil)
+	require.NoError(err)
+	require.NotEmpty(window.Messages)
+	assert.Equal("plain text", window.Messages[0].BodyText)
+	assert.Zero(opener.opens, "batch body population must never open blobs")
 }
 
 func TestExternalHashLookupsWithoutRows(t *testing.T) {

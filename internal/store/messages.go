@@ -828,13 +828,20 @@ func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, form
 // GetMessageRaw retrieves and decompresses the raw MIME data for a message.
 func (s *Store) GetMessageRaw(messageID int64) ([]byte, error) {
 	var compressed []byte
-	var compression sql.NullString
+	var compression, contentHash sql.NullString
 
 	err := s.db.QueryRow(`
-		SELECT raw_data, compression FROM message_raw WHERE message_id = ?
-	`, messageID).Scan(&compressed, &compression)
+		SELECT raw_data, compression, content_hash FROM message_raw WHERE message_id = ?
+	`, messageID).Scan(&compressed, &compression, &contentHash)
 	if err != nil {
 		return nil, err
+	}
+
+	// Externalized row: the exact raw bytes live in the attachment CAS
+	// (and possibly the remote tier) under content_hash; raw_data is a
+	// zero-length sentinel.
+	if contentHash.Valid && contentHash.String != "" {
+		return s.openExternalContent(context.Background(), contentHash.String, "message raw content")
 	}
 
 	if compression.Valid && compression.String == "zlib" {

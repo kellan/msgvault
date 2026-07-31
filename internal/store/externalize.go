@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -14,6 +15,38 @@ import (
 // message_raw.raw_data keeps its NOT NULL constraint (dropping it would
 // force a full-table rebuild in SQLite), so externalized rows hold a
 // zero-length blob; message_bodies.body_html is nullable and is set NULL.
+
+// RawBlobOpener resolves an externalized content hash to a verified
+// stream. The daemon wires it to the tiered attachment blob store, so
+// externalized content that has additionally been offloaded is served from
+// the backup repository transparently; local commands that own an archive
+// wire a process-local attachment store.
+type RawBlobOpener func(ctx context.Context, hash string) (io.ReadCloser, int64, error)
+
+// SetRawBlobOpener installs the opener. Call once at startup before the
+// store serves reads; a store holding externalized rows with no opener
+// fails those reads loudly rather than returning empty content.
+func (s *Store) SetRawBlobOpener(open RawBlobOpener) { s.rawBlobOpener = open }
+
+// openExternalContent buffers one externalized blob through the opener.
+// The stream must reach EOF for the CAS verification to complete, which
+// io.ReadAll guarantees; Close reports verification failures.
+func (s *Store) openExternalContent(ctx context.Context, hash, what string) ([]byte, error) {
+	if s.rawBlobOpener == nil {
+		return nil, fmt.Errorf(
+			"%s is externalized to the content store (hash %s) but no blob opener is configured; "+
+				"read through the msgvault daemon, or run this command on the archive host", what, hash)
+	}
+	rc, _, err := s.rawBlobOpener(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("open externalized %s %s: %w", what, hash, err)
+	}
+	data, readErr := io.ReadAll(rc)
+	if err := errors.Join(readErr, rc.Close()); err != nil {
+		return nil, fmt.Errorf("read externalized %s %s: %w", what, hash, err)
+	}
+	return data, nil
+}
 
 // MarkMessageRawExternalized records that messageID's raw content lives in
 // the CAS under hash, emptying the inline bytes in the same statement. The

@@ -49,6 +49,10 @@ type Store struct {
 	readOnly      bool // Opened via OpenReadOnly; skips WAL checkpoint on close
 	fts5Available bool // Whether FTS5 is available for full-text search
 	closeCleanup  func()
+	// rawBlobOpener resolves externalized raw/HTML content hashes to
+	// verified streams (message-raw-externalization-design.md). Set once at
+	// startup via SetRawBlobOpener, before the store serves reads.
+	rawBlobOpener RawBlobOpener
 }
 
 // synchronous=FULL + fullfsync=true protects WAL writes against OS/power crashes
