@@ -15,12 +15,16 @@ const EnvDiscordToken = "MSGVAULT_DISCORD_TOKEN" // #nosec G101 -- environment v
 // daemon-owned CLI subprocess.
 const EnvSlackToken = "MSGVAULT_SLACK_TOKEN" // #nosec G101 -- environment variable name, not a credential value
 
+// EnvBackupPassword names the env var used to pass an iPhone backup password
+// to a daemon-owned CLI subprocess (encrypted-backup imports).
+const EnvBackupPassword = "MSGVAULT_BACKUP_PASSWORD" // #nosec G101 -- environment variable name, not a credential value
+
 // EnvRemoteDeleteOptIn names the env var that opts into executing staged remote deletions.
 const EnvRemoteDeleteOptIn = "MSGVAULT_ENABLE_REMOTE_DELETE"
 
 func EnvAllowed(name string) bool {
 	switch name {
-	case EnvIMAPPassword, EnvBeeperToken, EnvDiscordToken, EnvSlackToken, EnvRemoteDeleteOptIn:
+	case EnvIMAPPassword, EnvBeeperToken, EnvDiscordToken, EnvSlackToken, EnvBackupPassword, EnvRemoteDeleteOptIn:
 		return true
 	default:
 		return false

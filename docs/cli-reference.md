@@ -727,6 +727,39 @@ See [Text Messages](/usage/text-messages/) for usage examples.
 
 ---
 
+## import-iphone-voicemail
+
+Import visual voicemails from an iTunes/Finder-style iPhone backup. Voicemails
+live only on the phone but are captured in a local device backup
+(`voicemail.db` plus one audio recording per message).
+
+```bash
+msgvault import-iphone-voicemail
+```
+
+Encrypted backups are supported: only the voicemail files are decrypted, never
+the whole backup. Supply the password interactively, with `--password-file`, or
+via the `MSGVAULT_BACKUP_PASSWORD` environment variable. With no `--backup-path`
+the platform's default MobileSync backup root is searched and the most recent
+device backup is used.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--backup-path` | — | iPhone backup directory or the MobileSync backup root |
+| `--password-file` | — | Read the encrypted-backup password from this file |
+| `--db-path` | — | Path to a pre-extracted `voicemail.db` (skips backup handling) |
+| `--media-dir` | — | Directory of pre-extracted audio files named `<rowid>.<ext>` (with `--db-path`) |
+| `--before` | — | Only voicemails before this date (YYYY-MM-DD) |
+| `--after` | — | Only voicemails on or after this date (YYYY-MM-DD) |
+| `--limit` | `0` | Limit number of voicemails (for testing) |
+| `--me` | — | Your phone/email, used as the recipient of each voicemail |
+| `--contacts` | — | Path to contacts `.vcf` file for display-name backfill |
+| `--no-audio` | `false` | Import metadata and transcripts without storing audio recordings |
+
+See [Text Messages](/usage/text-messages/) for usage examples.
+
+---
+
 ## import-gvoice
 
 Import texts, calls, and voicemails from a Google Voice Takeout export.

@@ -100,6 +100,44 @@ msgvault import-imessage --contacts ~/contacts.vcf
 
 `--contacts` accepts a vCard file such as macOS Contacts.app's **File > Export > Export vCard** output. Display names are matched by phone number or email address, and only currently-empty participant names are updated.
 
+## import-iphone-voicemail
+
+Import visual voicemails from an iTunes/Finder-style iPhone backup. Voicemails
+never sync to iCloud on their own, but a local device backup captures them:
+`voicemail.db` (caller, timestamp, duration, and — on newer iOS — the
+transcript) plus one audio recording per message.
+
+```bash
+# Search the default backup location for the most recent device backup
+msgvault import-iphone-voicemail
+
+# Point at a specific backup or the MobileSync backup root
+msgvault import-iphone-voicemail --backup-path ~/backup-udid
+
+# Set your own number so each voicemail is addressed to you
+msgvault import-iphone-voicemail --me +14155551234
+
+# Backfill caller names from a Contacts.app vCard export
+msgvault import-iphone-voicemail --contacts ~/contacts.vcf
+```
+
+Make a backup first with Finder/iTunes, or with
+`idevicebackup2 backup` from [libimobiledevice](https://libimobiledevice.org/)
+(which can run on a schedule for continuous archiving).
+
+**Encrypted backups** are supported. Only the handful of voicemail files are
+decrypted — never the whole backup. Supply the password interactively, with
+`--password-file`, or via the `MSGVAULT_BACKUP_PASSWORD` environment variable.
+
+If you have already extracted the files (for example with iMazing), skip the
+backup handling and pass `--db-path ./voicemail.db --media-dir ./audio`, where
+the audio directory holds recordings named `<rowid>.<ext>`.
+
+!!! note
+    Voicemail audio is stored as an attachment. iPhone recordings are usually
+    AMR, which most browsers cannot play inline; the file is still archived and
+    exportable. Voicemails are stored but not currently browsable in the TUI.
+
 ## import-gvoice
 
 Import texts, calls, and voicemails from a Google Voice Takeout export.

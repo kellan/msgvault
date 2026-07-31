@@ -140,8 +140,8 @@ msgvault query --format table "
 
 Known values are `email`, `calendar_event`, `meeting_transcript`, `beeper`,
 `teams`, `discord`, `sms`, `mms`, `whatsapp`, `imessage`, `fbmessenger`,
-`synctech_sms_call`, `google_voice_text`, `google_voice_call`, and
-`google_voice_voicemail`.
+`synctech_sms_call`, `google_voice_text`, `google_voice_call`,
+`google_voice_voicemail`, and `apple_voicemail`.
 
 ### Label statistics
 

@@ -72,6 +72,11 @@ make lint                     # Run linter
 ./msgvault import-emlx --account me@gmail.com         # Specific account(s)
 ./msgvault import-emlx /path/to/dir --identifier me@gmail.com  # Manual fallback
 
+# iPhone voicemail import (from an iTunes/Finder backup; encrypted backups supported)
+./msgvault import-iphone-voicemail                              # Auto-discover newest backup
+./msgvault import-iphone-voicemail --backup-path ~/backup-udid  # Specific backup
+./msgvault import-iphone-voicemail --db-path ./voicemail.db --media-dir ./audio  # Pre-extracted
+
 # Microsoft Teams (delegated Graph)
 ./msgvault add-teams you@tenant.com          # Authorize Teams (browser OAuth)
 ./msgvault sync-teams you@tenant.com         # Sync Teams chats + channels
