@@ -28,16 +28,42 @@ const thumbBearing = `thumbnail_hash IS NOT NULL AND thumbnail_hash != ''
 	AND thumbnail_path NOT LIKE 'http://%'
 	AND thumbnail_path NOT LIKE 'https://%'`
 
-// attachmentBlobsQuery counts the distinct content-bearing hashes reachable
-// from the archive with thumbnails included: exactly the population
-// ContentInfo enumerates and CaptureAttachments stores. UNION deduplicates
-// a thumbnail hash that also appears as a content hash, so this count always
-// equals len(ContentInfo.Refs) and the manifest's attachments.blobs.
-const attachmentBlobsQuery = `SELECT COUNT(*) FROM (
+// attachmentBlobsBaseQuery counts distinct attachment-row hashes; the full
+// variant adds externalized raw/HTML content: exactly the population
+// ContentInfo enumerates and CaptureAttachments stores, with the same case
+// treatment (attachment columns as recorded, externalized columns
+// lowercased), so the chosen count always equals len(ContentInfo.Refs) and
+// the manifest's attachments.blobs. Which variant applies depends on the
+// frozen archive's schema — frozen sessions never migrate.
+const attachmentBlobsBaseQuery = `SELECT COUNT(*) FROM (
 	SELECT content_hash AS h FROM attachments WHERE ` + contentBearing + `
 	UNION
 	SELECT thumbnail_hash AS h FROM attachments WHERE ` + thumbBearing + `
 )`
+
+const attachmentBlobsQuery = `SELECT COUNT(*) FROM (
+	SELECT content_hash AS h FROM attachments WHERE ` + contentBearing + `
+	UNION
+	SELECT thumbnail_hash AS h FROM attachments WHERE ` + thumbBearing + `
+	UNION
+	SELECT LOWER(content_hash) AS h FROM message_raw
+	WHERE content_hash IS NOT NULL AND content_hash != ''
+	UNION
+	SELECT LOWER(html_content_hash) AS h FROM message_bodies
+	WHERE html_content_hash IS NOT NULL AND html_content_hash != ''
+)`
+
+// hasExternalizedColumnsTx probes the frozen archive's schema for the
+// externalization hash columns (SQLite only — backup is SQLite-only).
+func hasExternalizedColumnsTx(ctx context.Context, q rowQuerier) (bool, error) {
+	var n int
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('message_raw') WHERE name = 'content_hash'`,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("backupapp: probing externalization columns: %w", err)
+	}
+	return n > 0, nil
+}
 
 // Stats is msgvault's manifest stats payload (moved from backup.ManifestStats;
 // identical field order and json tags).
@@ -63,6 +89,14 @@ type rowQuerier interface {
 // numbers derived by exactly the same queries the manifest recorded.
 func computeManifestStats(ctx context.Context, q rowQuerier) (Stats, error) {
 	var st Stats
+	extCols, err := hasExternalizedColumnsTx(ctx, q)
+	if err != nil {
+		return st, err
+	}
+	blobsQuery := attachmentBlobsBaseQuery
+	if extCols {
+		blobsQuery = attachmentBlobsQuery
+	}
 	counts := []struct {
 		dst   *int64
 		query string
@@ -73,14 +107,14 @@ func computeManifestStats(ctx context.Context, q rowQuerier) (Stats, error) {
 		{&st.Accounts, "SELECT COUNT(*) FROM account_identities"},
 		{&st.Labels, "SELECT COUNT(*) FROM labels"},
 		{&st.AttachmentRows, "SELECT COUNT(*) FROM attachments"},
-		{&st.AttachmentBlobs, attachmentBlobsQuery},
+		{&st.AttachmentBlobs, blobsQuery},
 	}
 	for _, c := range counts {
 		if err := q.QueryRowContext(ctx, c.query).Scan(c.dst); err != nil {
 			return st, fmt.Errorf("backupapp: stats query %q: %w", c.query, err)
 		}
 	}
-	err := q.QueryRowContext(ctx,
+	err = q.QueryRowContext(ctx,
 		"SELECT COALESCE(MIN(sent_at),''), COALESCE(MAX(sent_at),'') FROM messages",
 	).Scan(&st.DateRange[0], &st.DateRange[1])
 	if err != nil {
@@ -174,6 +208,58 @@ func (v *frozenView) ContentInfo(ctx context.Context) (*backup.ContentInfo, erro
 	}
 	if err := thumbRows.Err(); err != nil {
 		return nil, fmt.Errorf("backupapp: thumbnail locator rows: %w", err)
+	}
+
+	// Externalized raw MIME and rendered HTML are content blobs like any
+	// attachment (message-raw-externalization-design.md): the repository
+	// must hold them as first-class blobs so the offload invariant
+	// ("offload-eligible implies present in repo") extends to them. Their
+	// loose path is always the canonical CAS derivation. Archives created
+	// before the externalization columns (frozen sessions never migrate)
+	// skip these arms.
+	extCols, err := hasExternalizedColumnsTx(ctx, v.tx)
+	if err != nil {
+		return nil, err
+	}
+	var externalizedQueries []string
+	if extCols {
+		externalizedQueries = []string{
+			`SELECT LOWER(content_hash),
+		        SUBSTR(LOWER(content_hash), 1, 2) || '/' || LOWER(content_hash)
+		 FROM message_raw
+		 WHERE content_hash IS NOT NULL AND content_hash != ''
+		 GROUP BY content_hash ORDER BY MIN(message_id)`,
+			`SELECT LOWER(html_content_hash),
+		        SUBSTR(LOWER(html_content_hash), 1, 2) || '/' || LOWER(html_content_hash)
+		 FROM message_bodies
+		 WHERE html_content_hash IS NOT NULL AND html_content_hash != ''
+		 GROUP BY html_content_hash ORDER BY MIN(message_id)`,
+		}
+	}
+	for _, q := range externalizedQueries {
+		extRows, err := v.tx.QueryContext(ctx, q)
+		if err != nil {
+			return nil, fmt.Errorf("backupapp: externalized locator query: %w", err)
+		}
+		for extRows.Next() {
+			var ref backup.ContentRef
+			if err := extRows.Scan(&ref.Hash, &ref.StoragePath); err != nil {
+				_ = extRows.Close()
+				return nil, fmt.Errorf("backupapp: scanning externalized locator: %w", err)
+			}
+			if !seen[ref.Hash] {
+				ref.Size = -1
+				refs = append(refs, ref)
+				seen[ref.Hash] = true
+			}
+		}
+		closeErr := extRows.Close()
+		if err := extRows.Err(); err != nil {
+			return nil, fmt.Errorf("backupapp: externalized locator rows: %w", err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("backupapp: externalized locator close: %w", closeErr)
+		}
 	}
 
 	var rowCount int64

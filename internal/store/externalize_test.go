@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -197,6 +198,72 @@ func TestConversationWindowNeverFetchesExternalizedHTML(t *testing.T) {
 	require.NotEmpty(window.Messages)
 	assert.Equal("plain text", window.Messages[0].BodyText)
 	assert.Zero(opener.opens, "batch body population must never open blobs")
+}
+
+func TestExternalizedHashesAreFirstClassReferences(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	fx := newExternalizeFixture(t)
+	rawHash := strings.Repeat("5d", 32)
+	htmlHash := strings.Repeat("6e", 32)
+	require.NoError(fx.st.MarkMessageRawExternalized(ctx, fx.msgID, rawHash))
+	require.NoError(fx.st.MarkBodyHTMLExternalized(ctx, fx.msgID, htmlHash))
+
+	// Liveness authority: the resolver recognizes both hashes as members.
+	for _, hash := range []string{rawHash, htmlHash} {
+		loc, err := fx.st.ResolveAttachmentBlob(hash)
+		require.NoError(err)
+		assert.True(loc.Referenced, "externalized hash %s must be a live member", hash)
+	}
+	loc, err := fx.st.ResolveAttachmentBlob(strings.Repeat("9f", 32))
+	require.NoError(err)
+	assert.False(loc.Referenced)
+
+	// Orphan-sweep safety: both hashes are in the reference inventory.
+	refs, err := fx.st.ListReferencedBlobHashes()
+	require.NoError(err)
+	assert.Contains(refs, rawHash)
+	assert.Contains(refs, htmlHash)
+
+	// Pack candidates: both appear with the derived CAS-canonical path.
+	blobs, err := fx.st.ListUnpackedBlobs()
+	require.NoError(err)
+	byHash := map[string]store.UnpackedBlob{}
+	for _, b := range blobs {
+		byHash[b.Hash] = b
+	}
+	require.Contains(byHash, rawHash)
+	assert.Equal([]string{rawHash[:2] + "/" + rawHash}, byHash[rawHash].Paths)
+	require.Contains(byHash, htmlHash)
+	assert.Equal([]string{htmlHash[:2] + "/" + htmlHash}, byHash[htmlHash].Paths)
+
+	// Offloaded externalized blobs leave the candidate list but stay
+	// referenced, exactly like attachments.
+	require.NoError(fx.st.RecordBlobOffload(ctx, store.BlobOffloadRecord{
+		ContentHash: rawHash, RepoID: "repo-one",
+		OffloadedAt: time.Now().UTC(), StoredLen: 10,
+	}))
+	blobs, err = fx.st.ListUnpackedBlobs()
+	require.NoError(err)
+	for _, b := range blobs {
+		assert.NotEqual(rawHash, b.Hash, "offloaded raw blob must not be a pack candidate")
+	}
+	refs, err = fx.st.ListReferencedBlobHashes()
+	require.NoError(err)
+	assert.Contains(refs, rawHash, "offloaded raw blob stays referenced")
+
+	// Prune must not remove pack index rows for externalized blobs.
+	require.NoError(fx.st.RecordPackedBlobs(store.PackRecord{
+		PackID: "01hzy3v7q8r9s0t1a2v3w4x5z9", EntryCount: 1, StoredBytes: 128,
+		CreatedAt: time.Now(),
+	}, []store.PackIndexEntry{{
+		BlobHash: htmlHash, PackID: "01hzy3v7q8r9s0t1a2v3w4x5z9",
+		Offset: 6, StoredLen: 128, RawLen: 256,
+	}}))
+	pruned, err := fx.st.PruneUnreferencedPackIndex(ctx)
+	require.NoError(err)
+	assert.Zero(pruned, "externalized blob's index row is live, not prunable")
 }
 
 func TestExternalHashLookupsWithoutRows(t *testing.T) {

@@ -203,7 +203,17 @@ func validateRestoredPackAuthority(
 }
 
 func restoredAttachmentMembership(ctx context.Context, tx *sql.Tx) (map[packstore.Hash]struct{}, error) {
-	rows, err := tx.QueryContext(ctx, attachmentReferencedHashesSQL)
+	// The restored database is a byte-exact materialization of the
+	// snapshot and is never migrated here, so a snapshot taken before the
+	// externalization columns existed must be read with the base arms.
+	membershipSQL := attachmentReferencedHashesBaseSQL
+	var extCols int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('message_raw') WHERE name = 'content_hash'`,
+	).Scan(&extCols); err == nil && extCols > 0 {
+		membershipSQL = attachmentReferencedHashesSQL
+	}
+	rows, err := tx.QueryContext(ctx, membershipSQL)
 	if err != nil {
 		return nil, fmt.Errorf("list restored attachment membership: %w", err)
 	}

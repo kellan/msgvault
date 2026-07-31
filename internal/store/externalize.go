@@ -16,6 +16,31 @@ import (
 // force a full-table rebuild in SQLite), so externalized rows hold a
 // zero-length blob; message_bodies.body_html is nullable and is set NULL.
 
+// hasExternalizedColumns reports whether this database carries the
+// externalization hash columns. Pre-externalization databases reached
+// through read-only opens or snapshot restores never migrate, so reference
+// queries fall back to the base (attachments-only) arms there instead of
+// erroring on a missing column. The flag is probed at open time and set by
+// InitSchema's migrations — never queried here, because callers hold open
+// transactions (a probe query would deadlock a single-connection store).
+func (s *Store) hasExternalizedColumns() bool {
+	return s.extColumnsPresent.Load()
+}
+
+// probeExternalizedColumns detects the externalization hash columns at
+// open time, before any transaction can be in flight.
+func (s *Store) probeExternalizedColumns() {
+	query := `SELECT COUNT(*) FROM pragma_table_info('message_raw') WHERE name = 'content_hash'`
+	if s.IsPostgreSQL() {
+		query = `SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_name = 'message_raw' AND column_name = 'content_hash'`
+	}
+	var n int
+	if err := s.db.QueryRow(query).Scan(&n); err == nil && n > 0 {
+		s.extColumnsPresent.Store(true)
+	}
+}
+
 // RawBlobOpener resolves an externalized content hash to a verified
 // stream. The daemon wires it to the tiered attachment blob store, so
 // externalized content that has additionally been offloaded is served from
