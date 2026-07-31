@@ -151,4 +151,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace go.kenn.io/kit => github.com/kellan/kit v0.0.0-20260731120757-f8c61839ea2d
+replace go.kenn.io/kit => github.com/kellan/kit v0.0.0-20260731135530-a44e0cfdcc93
