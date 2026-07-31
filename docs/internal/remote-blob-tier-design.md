@@ -592,6 +592,45 @@ alternative.)
    join as attachments do), which makes the date policy exact for the
    class that dominates the bytes.
 
+### Deletion state as an offload policy (2026-07-31)
+
+The schema already distinguishes two deletion states per message, both
+directly usable as offload selectors: `messages.deleted_at` (flag-deleted:
+hidden in the archive but retained) and `messages.deleted_from_source_at`
+(deletion executed against the source via the deletion pipeline), the
+latter indexed by `idx_messages_deleted`
+(`internal/store/schema.sql:189-190,491`).
+
+These are the coldest rows in any archive — a source-deleted message will
+never re-sync or change, and a flag-deleted one is content the user has
+already decided not to look at — so `offload` accepts them as selection
+predicates alongside the date policy:
+
+```text
+msgvault offload --deleted-from-source [--before DATE] ...
+msgvault offload --archive-deleted     [--before DATE] ...
+```
+
+Predicates AND together. As with the date policy, selection is per message
+for raw MIME, and an attachment blob is offload-eligible only when *every*
+referencing message matches the selection — a blob shared with a live,
+undeleted message stays local.
+
+Two notes:
+
+- **Source-deleted messages are the only copy in existence.** There is no
+  Gmail to re-fetch from; the archive — and behind it the repository — is
+  it. The verified-eviction ladder is unchanged (present in repo index,
+  verified remote read, then evict), but these rows are precisely why it
+  is strict, and the user docs should present this mode as the completion
+  of the existing deletion lifecycle: archive → back up → verify → delete
+  from source → evict local bytes. Metadata, search, and bodies stay
+  local; the bytes rest in the repository.
+- The `deletions/` audit directory (manifests of staged/executed
+  deletions) is small (3.7 MB on the measured archive) and is already
+  captured automatically by `backup create`; it is not an offload target
+  and needs no change.
+
 ### Amended delivery order
 
 1. **Kit**: widen `pack.Reader` to `io.ReaderAt` + `NewReaderFromReaderAt`.
