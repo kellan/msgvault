@@ -107,6 +107,129 @@ func (s *Store) OffloadRepoIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// OffloadSelection describes which blobs `msgvault offload` may evict.
+// Conditions AND together and every predicate is evaluated per referencing
+// message: a blob qualifies only when ALL messages that reference it (via
+// content or thumbnail hash) match, so a blob shared with a hot message
+// stays local. At least one condition must be set.
+type OffloadSelection struct {
+	// Before selects messages whose canonical date (sent_at, falling back
+	// to internal_date) is known and earlier than this bound. Zero means
+	// no date condition.
+	Before time.Time
+	// RequireSourceDeleted selects messages whose deletion was executed
+	// against the source (deleted_from_source_at set).
+	RequireSourceDeleted bool
+	// RequireArchiveDeleted selects flag-deleted messages (deleted_at set).
+	RequireArchiveDeleted bool
+}
+
+// Empty reports whether no condition is set.
+func (sel OffloadSelection) Empty() bool {
+	return sel.Before.IsZero() && !sel.RequireSourceDeleted && !sel.RequireArchiveDeleted
+}
+
+// OffloadCandidate is one blob every reference of which matches the
+// selection. MaxSize is the largest recorded attachment size for the hash,
+// or -1 when the hash is referenced only as a thumbnail (sizes unknown).
+type OffloadCandidate struct {
+	ContentHash string
+	MaxSize     int64
+}
+
+// ListOffloadCandidates returns the not-yet-offloaded blobs whose every
+// referencing message matches sel, ordered by hash for stable batches.
+func (s *Store) ListOffloadCandidates(ctx context.Context, sel OffloadSelection) ([]OffloadCandidate, error) {
+	if sel.Empty() {
+		return nil, errors.New("list offload candidates: empty selection")
+	}
+	var conds []string
+	var args []any
+	if !sel.Before.IsZero() {
+		conds = append(conds,
+			"COALESCE(m.sent_at, m.internal_date) IS NOT NULL AND COALESCE(m.sent_at, m.internal_date) < ?")
+		args = append(args, sel.Before.UTC())
+	}
+	if sel.RequireSourceDeleted {
+		conds = append(conds, "m.deleted_from_source_at IS NOT NULL")
+	}
+	if sel.RequireArchiveDeleted {
+		conds = append(conds, "m.deleted_at IS NOT NULL")
+	}
+	pred := strings.Join(conds, " AND ")
+
+	query := `
+		WITH refs AS (
+			SELECT LOWER(content_hash) AS h, message_id, COALESCE(size, -1) AS sz
+			FROM attachments
+			WHERE content_hash IS NOT NULL AND content_hash != ''
+			UNION ALL
+			SELECT LOWER(thumbnail_hash) AS h, message_id, -1 AS sz
+			FROM attachments
+			WHERE thumbnail_hash IS NOT NULL AND thumbnail_hash != ''
+		)
+		SELECT r.h, MAX(r.sz)
+		FROM refs r
+		JOIN messages m ON m.id = r.message_id
+		WHERE NOT EXISTS (SELECT 1 FROM blob_offload bo WHERE bo.content_hash = r.h)
+		GROUP BY r.h
+		HAVING COUNT(*) = COUNT(CASE WHEN ` + pred + ` THEN 1 END)
+		ORDER BY r.h`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list offload candidates: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var out []OffloadCandidate
+	for rows.Next() {
+		var c OffloadCandidate
+		if err := rows.Scan(&c.ContentHash, &c.MaxSize); err != nil {
+			return nil, fmt.Errorf("scan offload candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate offload candidates: %w", err)
+	}
+	return out, nil
+}
+
+// ListBlobLocalPaths returns the DB-recorded local (non-URL) relative paths
+// under the attachments dir where hash may exist as a loose file, from both
+// storage_path and thumbnail_path columns.
+func (s *Store) ListBlobLocalPaths(ctx context.Context, hash string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT storage_path FROM attachments
+		WHERE LOWER(content_hash) = ?
+		  AND storage_path IS NOT NULL AND storage_path != ''
+		  AND LOWER(storage_path) NOT LIKE 'http://%'
+		  AND LOWER(storage_path) NOT LIKE 'https://%'
+		UNION
+		SELECT thumbnail_path FROM attachments
+		WHERE LOWER(thumbnail_hash) = ?
+		  AND thumbnail_path IS NOT NULL AND thumbnail_path != ''
+		  AND LOWER(thumbnail_path) NOT LIKE 'http://%'
+		  AND LOWER(thumbnail_path) NOT LIKE 'https://%'`,
+		strings.ToLower(hash), strings.ToLower(hash))
+	if err != nil {
+		return nil, fmt.Errorf("list blob local paths %s: %w", hash, err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan blob local path: %w", err)
+		}
+		paths = append(paths, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate blob local paths: %w", err)
+	}
+	return paths, nil
+}
+
 // ListOffloadedHashes returns every offloaded content hash (canonical
 // lowercase) as a set.
 func (s *Store) ListOffloadedHashes(ctx context.Context) (map[string]struct{}, error) {
