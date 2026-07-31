@@ -233,14 +233,40 @@ assumption is now measured false, and bodies need their own decision.
 `body_text` is load-bearing locally (FTS triggers, snippets, embedding
 generation) and should stay. `body_html` is derived data — parsed from
 the raw MIME this design keeps byte-exact — and is read only by the
-single-message detail view via PK lookup. Pending the text/html split
-measurement, the leading option is a follow-up phase that drops or
-externalizes `body_html`, re-deriving it from the raw blob (local or
-tier-fetched) on demand at detail-view time, with the same batched
-migration shape as `externalize-raw`. That phase must respect the
-`message_bodies` FTS trigger coupling (`schema.sql:354-361`): triggers
-fire on body rows, so only the `body_html` column is in scope, never the
-row or `body_text`.
+single-message detail view via PK lookup.
+
+The split, measured 2026-07-31: `body_text` ~1.8 GiB, `body_html`
+**~10.3 GiB** — 40% of the whole database, the single largest cost in
+the archive.
+
+**Decided direction: drop-and-derive, guarded by raw availability.** A
+follow-up phase NULLs `body_html` for every message that has a
+`message_raw` row (post-externalization: a raw content hash), and the
+detail view re-derives HTML on demand — fetch the raw blob (local CAS
+or tier), run the existing MIME parse, render. Rationale over
+externalizing the HTML as its own blob class: the bytes already exist
+inside the raw MIME, so externalization would store the same content
+twice in the repository forever; derivation costs milliseconds of parse
+on a PK-lookup-only path and nothing at rest. Rows whose message has no
+raw content keep `body_html` untouched — derived data is only dropped
+where its source is provably held. The guard population must be
+measured before the phase is scoped:
+
+```sql
+SELECT COUNT(*), SUM(LENGTH(body_html))/1024/1024 AS orphan_html_mib
+FROM message_bodies mb
+WHERE mb.body_html IS NOT NULL AND mb.body_html != ''
+  AND NOT EXISTS (SELECT 1 FROM message_raw mr WHERE mr.message_id = mb.message_id);
+```
+
+Two constraints carry over from the store survey: the phase touches only
+the `body_html` column, never the row or `body_text` (the
+`message_bodies` FTS triggers at `schema.sql:354-361` fire on body
+rows); and derivation must reproduce the charset/encoding handling the
+original parse applied, verified by a before/after render-equivalence
+test on a real-archive sample, since historical `repair-encoding` runs
+may have touched stored HTML that a fresh parse would derive
+differently.
 
 ## Testing
 
