@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/attachmenttier"
 	"go.kenn.io/msgvault/internal/circleback"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/deletion"
@@ -28,6 +29,7 @@ import (
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/oauth"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/remoterepo"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
@@ -218,7 +220,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open attachment maintenance: %w", err)
 	}
 	defer func() { _ = attachmentMaint.close() }()
-	blobStore := attachmentMaint.blob
+	// The API serves attachment bytes through this handle. With [offload]
+	// configured it is decorated with the remote blob tier: local misses on
+	// cataloged blobs fall through to the backup repository, dialed lazily
+	// so an unmounted repository never blocks daemon startup.
+	var blobStore api.AttachmentBlobStore = attachmentMaint.blob
+	if cfg.Offload.Enabled() {
+		offloadRepo := cfg.Offload.Repo
+		blobStore = attachmenttier.New(attachmentMaint.blob, s,
+			func() (attachmenttier.RemoteReader, error) {
+				return remoterepo.Open(offloadRepo)
+			})
+		logger.Info("remote blob tier enabled", "repo", offloadRepo)
+	}
 
 	// Vector misconfiguration still fails startup fast; the expensive
 	// backend open/migrate/backfill runs in the background after the API

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.kenn.io/msgvault/internal/attachmenttier"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -465,6 +466,11 @@ func (s *Server) handleGetFileContent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeError(w, http.StatusNotFound, "file_content_unavailable", "File content is not available")
+			return
+		}
+		if errors.Is(err, attachmenttier.ErrRemoteUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "remote_tier_unavailable",
+				"File is offloaded and the backup repository is currently unreachable")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to open file content")

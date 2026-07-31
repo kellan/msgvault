@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/accountops"
+	"go.kenn.io/msgvault/internal/attachmenttier"
 	"go.kenn.io/msgvault/internal/cacheops"
 	"go.kenn.io/msgvault/internal/clirun"
 	"go.kenn.io/msgvault/internal/collectionops"
@@ -2371,6 +2372,11 @@ func (s *Server) handleCLIAttachment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				writeError(w, http.StatusNotFound, "not_found", "Attachment not found")
+				return
+			}
+			if errors.Is(err, attachmenttier.ErrRemoteUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "remote_tier_unavailable",
+					"Attachment is offloaded and the backup repository is currently unreachable")
 				return
 			}
 			s.logger.Error("failed to open CLI attachment", "content_hash", contentHash, "error", err)
