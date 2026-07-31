@@ -3,8 +3,12 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -316,6 +320,67 @@ func TestMergeDuplicatesBackfillsExternalizedRaw(t *testing.T) {
 	require.NoError(err)
 	assert.True(hasRow, "survivor gained a raw row")
 	assert.Equal(hash, gotHash, "survivor's raw content is the externalized hash pointer")
+}
+
+func TestUpsertMessageRawCASNative(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	st := testutil.NewTestStore(t)
+	casDir := t.TempDir()
+	raw := []byte("cas-native raw mime bytes")
+	sum := sha256.Sum256(raw)
+	wantHash := hex.EncodeToString(sum[:])
+
+	src, err := st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := st.EnsureConversation(src.ID, "cas-thread", "CAS Thread")
+	require.NoError(err)
+	newMsg := func(sid string) int64 {
+		id, err := st.UpsertMessage(&store.Message{
+			ConversationID: convID, SourceID: src.ID,
+			SourceMessageID: sid, MessageType: "email",
+		})
+		require.NoError(err)
+		return id
+	}
+
+	// Marker unset: inline as always, even with a writer wired.
+	st.SetRawBlobWriter(store.LooseCASWriter(casDir))
+	inlineID := newMsg("cas-msg-inline")
+	require.NoError(st.UpsertMessageRaw(inlineID, raw))
+	hash, _, err := st.MessageRawExternalHash(ctx, inlineID)
+	require.NoError(err)
+	assert.Empty(hash, "pre-marker writes stay inline")
+
+	// Marker set + writer: slim row plus durable loose blob.
+	require.NoError(st.SetArchiveExternalized(ctx))
+	nativeID := newMsg("cas-msg-native")
+	require.NoError(st.UpsertMessageRaw(nativeID, raw))
+	hash, _, err = st.MessageRawExternalHash(ctx, nativeID)
+	require.NoError(err)
+	assert.Equal(wantHash, hash)
+	blob, err := os.ReadFile(filepath.Join(casDir, wantHash[:2], wantHash))
+	require.NoError(err)
+	assert.Equal(raw, blob)
+
+	// Round trip through the opener.
+	opener := &countingOpener{blobs: map[string][]byte{wantHash: raw}}
+	st.SetRawBlobOpener(opener.open)
+	got, err := st.GetMessageRaw(nativeID)
+	require.NoError(err)
+	assert.Equal(raw, got)
+
+	// Marker set but no writer: inline fallback, never a failed ingest.
+	st.SetRawBlobWriter(nil)
+	fallbackID := newMsg("cas-msg-fallback")
+	require.NoError(st.UpsertMessageRaw(fallbackID, raw))
+	hash, _, err = st.MessageRawExternalHash(ctx, fallbackID)
+	require.NoError(err)
+	assert.Empty(hash, "writer-less stores fall back to inline")
+	got, err = st.GetMessageRaw(fallbackID)
+	require.NoError(err)
+	assert.Equal(raw, got)
 }
 
 func TestExternalHashLookupsWithoutRows(t *testing.T) {

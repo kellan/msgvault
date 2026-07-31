@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -38,6 +42,76 @@ func (s *Store) probeExternalizedColumns() {
 	var n int
 	if err := s.db.QueryRow(query).Scan(&n); err == nil && n > 0 {
 		s.extColumnsPresent.Store(true)
+	}
+}
+
+// RawBlobWriter durably stores content under its hash in the CAS,
+// reporting whether an identical blob already existed.
+type RawBlobWriter func(hash string, content []byte) (deduped bool, err error)
+
+// SetRawBlobWriter installs the CAS writer used for CAS-native raw writes
+// on archives whose inline content has been fully externalized. Without a
+// writer, new raw content is stored inline (safe: a later externalize run
+// migrates it), never dropped.
+func (s *Store) SetRawBlobWriter(write RawBlobWriter) { s.rawBlobWriter = write }
+
+// WriteLooseCASBlob durably writes content at dir's canonical CAS path
+// (hash[:2]/hash), verifying by readback before reporting success. An
+// existing file is verified against the hash instead of rewritten
+// (content-addressed dedup); a mismatch is corruption and fails loudly.
+func WriteLooseCASBlob(dir, hash string, content []byte) (deduped bool, err error) {
+	if len(hash) != 64 {
+		return false, fmt.Errorf("write CAS blob: malformed hash %q", hash)
+	}
+	for _, c := range hash {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false, fmt.Errorf("write CAS blob: malformed hash %q", hash)
+		}
+	}
+	target := filepath.Join(dir, hash[:2], hash)
+	if _, statErr := os.Stat(target); statErr == nil {
+		existing, readErr := os.ReadFile(target)
+		if readErr != nil {
+			return false, fmt.Errorf("verify existing blob %s: %w", hash, readErr)
+		}
+		if sum := sha256.Sum256(existing); hex.EncodeToString(sum[:]) != hash {
+			return false, fmt.Errorf("existing blob %s does not match its hash; refusing to reuse", hash)
+		}
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".cas-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(content)
+	if err := errors.Join(writeErr, tmp.Sync(), tmp.Close()); err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	written, err := os.ReadFile(tmpName)
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	if sum := sha256.Sum256(written); hex.EncodeToString(sum[:]) != hash {
+		_ = os.Remove(tmpName)
+		return false, fmt.Errorf("blob %s readback mismatch", hash)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		_ = os.Remove(tmpName)
+		return false, err
+	}
+	return false, nil
+}
+
+// LooseCASWriter returns a RawBlobWriter rooted at dir.
+func LooseCASWriter(dir string) RawBlobWriter {
+	return func(hash string, content []byte) (bool, error) {
+		return WriteLooseCASBlob(dir, hash, content)
 	}
 }
 
@@ -213,7 +287,8 @@ func (s *Store) GetBodyHTMLInline(ctx context.Context, messageID int64) (string,
 // fully externalized; new syncs then write CAS-native.
 const archiveExternalizedKey = "externalized_content"
 
-// SetArchiveExternalized records the completion marker.
+// SetArchiveExternalized records the completion marker and flips this
+// store to CAS-native raw writes.
 func (s *Store) SetArchiveExternalized(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO archive_metadata (key, value) VALUES (?, 'v1')
@@ -221,7 +296,20 @@ func (s *Store) SetArchiveExternalized(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("set archive externalized marker: %w", err)
 	}
+	s.casNativeRaw.Store(true)
 	return nil
+}
+
+// probeCASNativeRaw loads the externalized marker at open time: the flag
+// is consulted on the raw write path, which may run inside transactions
+// where a probe query could deadlock a single-connection store.
+func (s *Store) probeCASNativeRaw() {
+	var value string
+	if err := s.db.QueryRow(`
+		SELECT value FROM archive_metadata WHERE key = ?`,
+		archiveExternalizedKey).Scan(&value); err == nil && value != "" {
+		s.casNativeRaw.Store(true)
+	}
 }
 
 // ArchiveExternalized reports whether the completion marker is set.

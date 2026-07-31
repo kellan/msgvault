@@ -7,12 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
-	msgexport "go.kenn.io/msgvault/internal/export"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -238,54 +235,9 @@ func externalizeOne(ctx context.Context, st *store.Store, attachmentsDir string,
 	return true, nil
 }
 
-// writeLooseCASBlob durably writes content at the canonical CAS path,
-// verifying by readback before reporting success. An existing file is
-// verified against the expected hash instead of rewritten (content-addressed
-// dedup); a mismatch is corruption and fails loudly.
+// writeLooseCASBlob delegates to the store's shared CAS writer.
 func writeLooseCASBlob(attachmentsDir, hash string, content []byte) (deduped bool, err error) {
-	target, err := msgexport.StoragePath(attachmentsDir, hash)
-	if err != nil {
-		return false, err
-	}
-	if _, statErr := os.Stat(target); statErr == nil {
-		existing, readErr := os.ReadFile(target)
-		if readErr != nil {
-			return false, fmt.Errorf("verify existing blob %s: %w", hash, readErr)
-		}
-		if sum := sha256.Sum256(existing); hex.EncodeToString(sum[:]) != hash {
-			return false, fmt.Errorf("existing blob %s does not match its hash; refusing to reuse", hash)
-		}
-		return true, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".externalize-*")
-	if err != nil {
-		return false, err
-	}
-	tmpName := tmp.Name()
-	_, writeErr := tmp.Write(content)
-	if err := errors.Join(writeErr, tmp.Sync(), tmp.Close()); err != nil {
-		_ = os.Remove(tmpName)
-		return false, err
-	}
-	// Readback verification: the row is only slimmed once the durable
-	// bytes provably reproduce the hash.
-	written, err := os.ReadFile(tmpName)
-	if err != nil {
-		_ = os.Remove(tmpName)
-		return false, err
-	}
-	if sum := sha256.Sum256(written); hex.EncodeToString(sum[:]) != hash {
-		_ = os.Remove(tmpName)
-		return false, fmt.Errorf("blob %s readback mismatch; not marking row", hash)
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		_ = os.Remove(tmpName)
-		return false, err
-	}
-	return false, nil
+	return store.WriteLooseCASBlob(attachmentsDir, hash, content)
 }
 
 func printExternalizeSummary(out io.Writer, st *store.Store, r externalizeResult) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.kenn.io/msgvault/internal/attachmentstore"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -144,7 +145,20 @@ func openWritableStoreAndInitWith(migrate func(*store.Store) error) (*store.Stor
 		return nil, nil, err
 	}
 
+	// Externalized content support for direct-write commands: reads
+	// resolve through a process-local attachment store (packed CAS with
+	// loose fallback) and CAS-native raw writes land as loose blobs.
+	blobs, err := attachmentstore.New(store.NewPackCatalog(st), cfg.AttachmentsDir())
+	if err != nil {
+		_ = st.Close()
+		release()
+		return nil, nil, fmt.Errorf("open attachment store for externalized content: %w", err)
+	}
+	st.SetRawBlobOpener(blobs.OpenStream)
+	st.SetRawBlobWriter(store.LooseCASWriter(cfg.AttachmentsDir()))
+
 	cleanup := func() {
+		_ = blobs.Close()
 		_ = st.Close()
 		release()
 	}

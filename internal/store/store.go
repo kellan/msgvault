@@ -54,6 +54,12 @@ type Store struct {
 	// verified streams (message-raw-externalization-design.md). Set once at
 	// startup via SetRawBlobOpener, before the store serves reads.
 	rawBlobOpener RawBlobOpener
+	// rawBlobWriter stores CAS-native raw content on fully externalized
+	// archives (casNativeRaw). Set once at startup.
+	rawBlobWriter RawBlobWriter
+	// casNativeRaw reports the archive_metadata externalized marker: new
+	// raw content is written to the CAS instead of inline.
+	casNativeRaw atomic.Bool
 	// extColumnsPresent caches a positive schema probe for the
 	// externalization hash columns. Read-only opens skip migrations and
 	// restored snapshots are byte-exact, so pre-externalization databases
@@ -172,6 +178,7 @@ func openSQLite(dbPath, params string) (*Store, error) {
 		dialect: dialect,
 	}
 	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 	return s, nil
 }
 
@@ -207,6 +214,7 @@ func openPostgres(dbURL string) (*Store, error) {
 		closeCleanup: cleanup,
 	}
 	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 	return s, nil
 }
 
@@ -258,6 +266,7 @@ func OpenReadOnly(dbPath string) (*Store, error) {
 
 	s.fts5Available = dialect.FTSAvailable(db)
 	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 
 	return s, nil
 }
@@ -303,6 +312,7 @@ func openPostgresReadOnly(dbURL string) (*Store, error) {
 
 	s.fts5Available = dialect.FTSAvailable(db)
 	s.probeExternalizedColumns()
+	s.probeCASNativeRaw()
 
 	return s, nil
 }
