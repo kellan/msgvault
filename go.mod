@@ -150,3 +150,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace go.kenn.io/kit => github.com/kellan/kit v0.0.0-20260731135530-a44e0cfdcc93
