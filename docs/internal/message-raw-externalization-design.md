@@ -7,8 +7,13 @@ remote blob tier (`remote-blob-tier-design.md`). This is step 2 of that
 design's amended delivery order and the change that attacks the dominant
 share of archive size.
 
-Written 2026-07-31. Status: draft for review; sizing confirmation on the
-target archive pending (per-table dbstat run in progress).
+Written 2026-07-31. Status: measurements complete; implementation plan in
+`message-raw-externalization-plan.md`. Implementation note amending the
+schema sketch below: SQLite cannot drop NOT NULL without a full table
+rebuild — a needless risk on a 9 GiB table — so externalized rows keep
+`raw_data` as a zero-length blob and `content_hash IS NOT NULL` is the
+sole row-state discriminator; VACUUM after migration reclaims the space
+either way.
 
 ## Motivation
 
