@@ -99,81 +99,81 @@ existing row's `repo_id` is refused.
 
 ## Task 1: `[offload]` config section
 
-- [ ] Failing tests in `internal/config/config_test.go`: defaults applied
+- [x] Failing tests in `internal/config/config_test.go`: defaults applied
       (`max_snapshot_age_days` = 14), `repo` path `~` expansion and
       config-relative resolution, validation rejects `s3://`/`https://`
       schemes with a "not yet supported" error, `Enabled()` false when empty.
-- [ ] Implement `OffloadConfig { Repo string; MaxSnapshotAgeDays int }` with
+- [x] Implement `OffloadConfig { Repo string; MaxSnapshotAgeDays int }` with
       `ApplyDefaults`/`Validate`/`Enabled`, register in `NewDefaultConfig`,
       `decodeConfig`, `expandPath` and `resolveRelative` lists (mirror
       `cfg.Backup.Repo`).
-- [ ] `go test ./internal/config/ -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add [offload] config section`
+- [x] `go test ./internal/config/ -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add [offload] config section`
 
 ## Task 2: blob_offload table and store accessors
 
-- [ ] Failing tests in `internal/store/offload_test.go` (via
+- [x] Failing tests in `internal/store/offload_test.go` (via
       `testutil.NewTestStore`): record → lookup true; delete → false; stats
       sum count/bytes; re-record same hash upserts; record with different
       repo_id for existing rows surfaces in `OffloadRepoIDs`.
-- [ ] Add table to both schemas; implement `internal/store/offload.go`:
+- [x] Add table to both schemas; implement `internal/store/offload.go`:
       `RecordBlobOffload`, `DeleteBlobOffload`, `IsBlobOffloaded`,
       `OffloadedBlobStats`, `OffloadRepoIDs`, `ListOffloadedHashes`.
-- [ ] `go test ./internal/store/ -run Offload -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add blob_offload catalog table and store accessors`
+- [x] `go test ./internal/store/ -run Offload -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add blob_offload catalog table and store accessors`
 
 ## Task 3: maintenance inventory excludes offloaded blobs
 
-- [ ] Failing test: seed an attachment row + `blob_offload` row; assert the
+- [x] Failing test: seed an attachment row + `blob_offload` row; assert the
       hash is absent from `ListReferencedBlobHashes` and `ListUnpackedBlobs`,
       and still present after `DeleteBlobOffload`.
-- [ ] Add `NOT EXISTS (SELECT 1 FROM blob_offload bo WHERE bo.content_hash =
+- [x] Add `NOT EXISTS (SELECT 1 FROM blob_offload bo WHERE bo.content_hash =
       ...)` predicates to both queries (content and thumbnail hash arms).
-- [ ] `go test ./internal/store/ -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Exclude offloaded blobs from attachment maintenance inventory`
+- [x] `go test ./internal/store/ -tags "fts5 sqlite_vec"`
+- [x] Commit: `Exclude offloaded blobs from attachment maintenance inventory`
 
 ## Task 4: remoterepo read-only client
 
-- [ ] Failing tests using a fixture repository built with kit's real
+- [x] Failing tests using a fixture repository built with kit's real
       primitives (`backup.Init`, `pack.NewWriter`, `Repo.WriteIndex`):
       `Has` true/false; `OpenBlob` streams bytes equal to the original and
       verifies on EOF; corrupted pack byte fails closed; blob added by a
       second index file is found after reload-on-miss; encrypted repo config
       refused; `RepoID` round-trips.
-- [ ] Implement `internal/remoterepo`: `Open(root)` (kit `backup.Open`,
+- [x] Implement `internal/remoterepo`: `Open(root)` (kit `backup.Open`,
       refuse `Encryption != ""`), lazy `LoadBlobIndex` union with one forced
       reload on miss, `Has(hash)`, `OpenBlob(ctx, hash)` returning
       `io.ReadCloser` + raw size via kit `Repo.OpenBlob` (ext `.mvpack`,
       nil crypter), `RepoID()`, `LatestSnapshot()`.
-- [ ] `go test ./internal/remoterepo/ -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add remoterepo read-only backup repository client`
+- [x] `go test ./internal/remoterepo/ -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add remoterepo read-only backup repository client`
 
 ## Task 5: attachmenttier decorator
 
-- [ ] Failing tests with fakes: local hit passes through; local
+- [x] Failing tests with fakes: local hit passes through; local
       `fs.ErrNotExist` + not offloaded → `fs.ErrNotExist` preserved; local
       miss + offloaded → remote stream served; remote open failure →
       `ErrRemoteUnavailable` (and NOT `fs.ErrNotExist`); remote lazily opened
       once and reused; nil remote config → decorator not constructed.
-- [ ] Implement `internal/attachmenttier`: `ErrRemoteUnavailable`, `Store`
+- [x] Implement `internal/attachmenttier`: `ErrRemoteUnavailable`, `Store`
       with `OpenStream`, lazy remote dial via constructor-injected opener.
-- [ ] `go test ./internal/attachmenttier/ -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add attachment tier decorator with remote fallthrough`
+- [x] `go test ./internal/attachmenttier/ -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add attachment tier decorator with remote fallthrough`
 
 ## Task 6: serve wiring and 503 mapping
 
-- [ ] Failing handler test: request for an offloaded hash whose repository is
+- [x] Failing handler test: request for an offloaded hash whose repository is
       unreachable returns 503 `remote_tier_unavailable` (not 404) on
       `/attachments/{hash}/content` and `/api/v1/cli/attachment`.
-- [ ] Wire decorator in `serve.go` when `cfg.Offload.Enabled()`; add
+- [x] Wire decorator in `serve.go` when `cfg.Offload.Enabled()`; add
       `errors.Is(err, attachmenttier.ErrRemoteUnavailable)` → 503 mapping in
       the three read handlers.
-- [ ] `go test ./internal/api/ -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Serve offloaded attachments through the remote tier`
+- [x] `go test ./internal/api/ -tags "fts5 sqlite_vec"`
+- [x] Commit: `Serve offloaded attachments through the remote tier`
 
 ## Task 7: offload command family
 
-- [ ] Failing e2e test (temp archive + fixture repo): `offload --before`
+- [x] Failing e2e test (temp archive + fixture repo): `offload --before`
       selects only attachments whose every referencing message predates the
       cutoff; `--deleted-from-source`/`--archive-deleted` predicates AND in;
       shared blob with a live reference is skipped; eviction removes loose
@@ -183,21 +183,41 @@ existing row's `repo_id` is refused.
       `max_snapshot_age_days`) refuses; empty repository refuses;
       `offload status` reports counts/bytes; `offload restore` re-materializes
       the loose file, verifies hash, deletes the record.
-- [ ] Implement `cmd/msgvault/cmd/offload.go`: local-only + daemon-stopped
+- [x] Implement `cmd/msgvault/cmd/offload.go`: local-only + daemon-stopped
       guard (mirror `unpack-attachments`), selection SQL in
       `internal/store/offload.go` (`ListOffloadCandidates(cutoff, requireSourceDeleted,
       requireArchiveDeleted)` returning hash, stored size, loose paths),
       verified read-through ladder (stream to EOF, compare raw length),
       transactional record+evict per blob, summary output.
-- [ ] `go test ./cmd/msgvault/cmd/ -run Offload -tags "fts5 sqlite_vec"`
-- [ ] Commit: `Add msgvault offload, offload status, offload restore`
+- [x] `go test ./cmd/msgvault/cmd/ -run Offload -tags "fts5 sqlite_vec"`
+- [x] Commit: `Add msgvault offload, offload status, offload restore`
 
 ## Task 8: docs
 
-- [ ] `docs/configuration.md`: `[offload]` section (local-path repositories,
+- [x] `docs/configuration.md`: `[offload]` section (local-path repositories,
       the s3/https roadmap note, plaintext caveat pointer).
-- [ ] Update design doc status line to reference this plan.
-- [ ] Commit: `Document [offload] configuration`
+- [x] Update design doc status line to reference this plan.
+- [x] Commit: `Document [offload] configuration`
+
+## Execution notes (2026-07-31)
+
+All eight tasks landed on the branch. Two deliberate deviations from the
+task text as written:
+
+- **Task 3 narrowed to `ListUnpackedBlobs` only.** Offloaded hashes stay in
+  `ListReferencedBlobHashes` on purpose: the loose-orphan sweep deletes
+  files that are NOT referenced, and a crash between `offload restore`
+  writing the loose file and deleting the `blob_offload` row must never
+  make that fresh copy sweepable. The test
+  `TestListReferencedBlobHashesKeepsOffloaded` pins the rationale; Tasks 2
+  and 3 shipped as one store commit.
+- **Offload requires the daemon stopped** (daemon-owner lock plus
+  live-daemon probe, the `unpack-attachments` pattern) rather than running
+  through the daemon-backed CLI; daemon-proxied offload stays deferred.
+
+Environment note: `TestPatchSettingsClassifiesFilesystemFailureAsServerError`
+fails in this container with or without these changes (root ignores the
+read-only-directory fixture); unrelated to this work.
 
 ## Deferred coordinated follow-up
 

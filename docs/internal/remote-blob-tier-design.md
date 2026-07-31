@@ -5,10 +5,12 @@ backup repository, with on-demand ranged reads through the daemon, so a
 laptop keeps full search/browse/analytics locally while the bulk of archive
 bytes live on cheap remote storage.
 
-Written 2026-07-31. Status: draft for review. Amended 2026-07-31 with
-real-archive sizing that reorders delivery: raw-MIME externalization is
-promoted from follow-up to prerequisite (see "Real-archive sizing" at the
-end).
+Written 2026-07-31. Status: first slice implemented (see
+`remote-blob-tier-plan.md`): local-path repositories, `blob_offload`
+catalog, tier decorator, `offload`/`status`/`restore`. Amended 2026-07-31
+with real-archive sizing that reorders remaining delivery: raw-MIME
+externalization is promoted from follow-up to prerequisite (see
+"Real-archive sizing" at the end).
 
 ## Motivation
 

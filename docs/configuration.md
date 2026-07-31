@@ -85,6 +85,16 @@ auto_build_cache = true
 repo = "~/Backups/msgvault"
 zstd_level = 0
 
+[offload]
+# Remote blob tier: a backup repository that serves attachment content
+# evicted locally by `msgvault offload`. Filesystem paths only for now
+# (external drive, NAS mount, rclone mount); the repository contents are
+# not encrypted, so protect the path accordingly. See `msgvault offload
+# --help` for selection and safety semantics.
+repo = "~/Backups/msgvault"
+# Refuse offload when the repository's newest snapshot is older than this.
+max_snapshot_age_days = 14
+
 [remote]
 # Remote msgvault endpoint for CLI remote mode
 url = "http://nas-ip:8080"
